@@ -1,0 +1,13 @@
+# PHPStan dla qutlet-allegro (D-G2). Poziom startowy 5 — podnosimy osobnym
+# punktem, gdy będzie realny kod do analizy. Stuby WordPressa dostarcza
+# rozszerzenie szepeviktor/phpstan-wordpress (ładowane poniżej).
+includes:
+    - vendor/szepeviktor/phpstan-wordpress/extension.neon
+
+parameters:
+    level: 5
+    paths:
+        - qutlet-allegro.php
+        - src/
+    excludePaths:
+        - vendor/

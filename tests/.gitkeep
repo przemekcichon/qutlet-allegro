@@ -1,0 +1,3 @@
+# Katalog na przyszłe fixture'y (m.in. zredagowane próbki zwrotek Allegro
+# REST API — patrz docs/allegro-api-samples w qutlet-meta). Pusty w FAZIE 0;
+# wypełniają go kolejne fazy (FAZA 3 → próbki, dalsze fazy → testy sync).

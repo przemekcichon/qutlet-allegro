@@ -1,0 +1,27 @@
+# Zależności Composera (autoloader ładowany z guardem — D-G1)
+/vendor/
+
+# Build tooling (jeśli dojdzie)
+/node_modules/
+
+# Środowisko i sekrety (klucze Allegro/AI → wp-config.php, nigdy do repo)
+.env
+.env.*
+
+# Artefakty IDE / edytora
+/.idea/
+/.vscode/
+*.sublime-project
+*.sublime-workspace
+.phpstorm.meta.php
+
+# PHPStan (cache wyników)
+/.phpstan/
+.phpstan.cache
+
+# System plików
+.DS_Store
+Thumbs.db
+
+# Logi i pliki tymczasowe
+*.log
