@@ -48,9 +48,10 @@ add_action( 'plugins_loaded', __NAMESPACE__ . '\\bootstrap' );
 /**
  * Punkt wejścia wtyczki. Uruchamiany na `plugins_loaded`.
  *
- * FAZA 0 = czysty szkielet: brak slice'ów, brak rejestracji komend WP-CLI
- * (D-0.3.1 — szkielet WP-CLI dopiero w FAZIE 2). Weryfikujemy tu wyłącznie
- * OBECNOŚĆ twardych zależności i przy braku robimy no-op + notice.
+ * Najpierw weryfikujemy OBECNOŚĆ twardych zależności (D-G5) i przy braku robimy
+ * no-op + notice. Gdy są obecne — rejestrujemy slice'y wtyczki. Aktualnie: slice
+ * `Auth/` (P-2.2 — flow OAuth). Komend WP-CLI wciąż nie rejestrujemy (D-0.3.1 —
+ * dopiero przy właściwej synchronizacji).
  *
  * @return void
  */
