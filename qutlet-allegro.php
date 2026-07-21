@@ -48,9 +48,10 @@ add_action( 'plugins_loaded', __NAMESPACE__ . '\\bootstrap' );
 /**
  * Punkt wejścia wtyczki. Uruchamiany na `plugins_loaded`.
  *
- * FAZA 0 = czysty szkielet: brak slice'ów, brak rejestracji komend WP-CLI
- * (D-0.3.1 — szkielet WP-CLI dopiero w FAZIE 2). Weryfikujemy tu wyłącznie
- * OBECNOŚĆ twardych zależności i przy braku robimy no-op + notice.
+ * Najpierw weryfikujemy OBECNOŚĆ twardych zależności (D-G5) i przy braku robimy
+ * no-op + notice. Gdy są obecne — rejestrujemy slice'y wtyczki. Aktualnie: slice
+ * `Auth/` (P-2.2 — flow OAuth). Komend WP-CLI wciąż nie rejestrujemy (D-0.3.1 —
+ * dopiero przy właściwej synchronizacji).
  *
  * @return void
  */
@@ -62,18 +63,22 @@ function bootstrap(): void {
 	}
 
 	/*
-	 * TODO (kolejne fazy): tu wpinamy inicjalizację slice'ów synchronizacji
-	 * (Auth/, OfferSync/ …) ładowanych z przestrzeni Qutlet\Allegro.
+	 * Slice Auth (P-2.2): flow „Połącz z Allegro" + callback OAuth. Rejestruje
+	 * własne hooki (admin_menu, rest_api_init, admin_post_*) — wszystkie PÓŹNIEJSZE
+	 * niż `plugins_loaded`. Auth nie czyta pól/serwisów core przy init, więc
+	 * kolejność względem core (UWAGA o kolejności, D-G5, niżej) go nie dotyczy:
+	 * wystarczy OBECNOŚĆ core zweryfikowana w `dependencies_met()`.
 	 *
 	 * UWAGA o kolejności (D-G5): WP ładuje wtyczki alfabetycznie, więc
-	 * `qutlet-allegro` startuje PRZED `qutlet-core`. Sprawdzenie OBECNOŚCI core
-	 * poniżej jest bezpieczne (stała `Qutlet\Core\VERSION` powstaje przy
-	 * ładowaniu pliku core, zanim odpali jakikolwiek `plugins_loaded`), ale
-	 * KOLEJNOŚCI callbacków nie gwarantuje. Realny init slice'ów — które czytają
-	 * pola/serwisy zarejestrowane przez core — musi wpiąć się na PÓŹNIEJSZYM
-	 * priorytecie niż core (core hakuje `plugins_loaded` z domyślnym 10, więc
-	 * allegro np. priorytet > 10) lub na dedykowanym hooku „core gotowe".
+	 * `qutlet-allegro` startuje PRZED `qutlet-core`. Sprawdzenie OBECNOŚCI core w
+	 * `dependencies_met()` jest bezpieczne (stała `Qutlet\Core\VERSION` powstaje
+	 * przy ładowaniu pliku core, zanim odpali jakikolwiek `plugins_loaded`), ale
+	 * KOLEJNOŚCI callbacków nie gwarantuje. Przyszły slice, który przy init CZYTA
+	 * pola/serwisy zarejestrowane przez core (np. OfferSync/), musi wpiąć się na
+	 * PÓŹNIEJSZYM priorytecie niż core (core hakuje `plugins_loaded` z domyślnym
+	 * 10, więc allegro np. priorytet > 10) lub na dedykowanym hooku „core gotowe".
 	 */
+	( new Auth\OAuthController() )->register();
 }
 
 /**
