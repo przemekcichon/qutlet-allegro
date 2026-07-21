@@ -1,6 +1,6 @@
 <?php
 /**
- * Slice Auth — magazyn tokenów OAuth (osobno para read i write) (P-2.1).
+ * Slice Auth — magazyn tokenów OAuth (cztery sloty: środowisko × rola) (P-2.1b).
  *
  * @package Qutlet\Allegro
  */
@@ -12,10 +12,20 @@ namespace Qutlet\Allegro\Auth;
 use InvalidArgumentException;
 
 /**
- * Trwały magazyn tokenów. Przechowuje OSOBNO dwie pary (D-2.G1): `read`
- * (tylko-odczyt) i `write` (zapis stanu magazynowego) — każda w odrębnej opcji
- * WP, każda rotowana niezależnie. Pętla odczytu operuje wyłącznie na roli `read`
- * i nie ma dostępu do pary `write`.
+ * Trwały magazyn tokenów. Przechowuje OSOBNO do czterech par (zrewidowane D-2.G1)
+ * kluczowanych DWUWYMIAROWO — (środowisko × rola): `production/read`,
+ * `production/write`, `sandbox/read`, `sandbox/write`. Każdy slot w odrębnej
+ * opcji WP, każdy rotowany niezależnie. Pętla odczytu operuje wyłącznie na roli
+ * `read` danego środowiska i nie ma dostępu do slotów `write`; operacja na
+ * sandboxie nie sięga poświadczeń produkcji.
+ *
+ * Klucz opcji WP (schemat wyprowadzalny programowo):
+ *   `qutlet_allegro_token_{środowisko}_{rola}`, np. `qutlet_allegro_token_production_read`.
+ * Poprzednie klucze z P-2.1 (`qutlet_allegro_token_read` / `…_write`) WYCOFANE;
+ * migracja niepotrzebna — nigdy nie zapisano do nich tokenów.
+ *
+ * Słownik slotu (środowiska + role) mieszka w {@see Environment} — magazyn referuje
+ * do jego stałych (naturalny kierunek zależności storage → config, jedno źródło prawdy).
  *
  * Zapis: `TokenSet` → JSON → szyfrowanie ({@see TokenCipher}) → opcja WP z
  * `autoload = false` (tokeny nie są potrzebne na każdym żądaniu). Gdy szyfrowanie
@@ -30,35 +40,23 @@ use InvalidArgumentException;
 final class TokenStore {
 
 	/**
-	 * Rola: para tokenów tylko-odczyt.
+	 * Prefiks klucza opcji WP dla slotu tokenów.
 	 */
-	public const ROLE_READ = 'read';
+	private const OPTION_PREFIX = 'qutlet_allegro_token_';
 
 	/**
-	 * Rola: para tokenów z prawem zapisu.
-	 */
-	public const ROLE_WRITE = 'write';
-
-	/**
-	 * Mapa rola → klucz opcji WP.
+	 * Zapisuje (lub nadpisuje przy rotacji) parę tokenów danego slotu.
 	 *
-	 * @var array<string,string>
-	 */
-	private const OPTION_KEYS = array(
-		self::ROLE_READ  => 'qutlet_allegro_token_read',
-		self::ROLE_WRITE => 'qutlet_allegro_token_write',
-	);
-
-	/**
-	 * Zapisuje (lub nadpisuje przy rotacji) parę tokenów danej roli.
-	 *
-	 * @param string   $role   Jedna ze stałych `self::ROLE_READ` / `self::ROLE_WRITE`.
-	 * @param TokenSet $tokens Zestaw tokenów do zapisania.
+	 * @param string   $environment Jedna ze stałych `Environment::SANDBOX` / `Environment::PRODUCTION`.
+	 * @param string   $role        Jedna ze stałych `Environment::ROLE_READ` / `Environment::ROLE_WRITE`.
+	 * @param TokenSet $tokens      Zestaw tokenów do zapisania.
 	 * @return bool True przy powodzeniu; false gdy szyfrowanie niedostępne lub
 	 *              serializacja/zapis się nie powiodły.
+	 *
+	 * @throws InvalidArgumentException Gdy slot (środowisko/rola) spoza dozwolonego zbioru.
 	 */
-	public function save( string $role, TokenSet $tokens ): bool {
-		$option = self::option_key( $role );
+	public function save( string $environment, string $role, TokenSet $tokens ): bool {
+		$option = self::option_key( $environment, $role );
 
 		$json = wp_json_encode( $tokens->to_array() );
 
@@ -76,14 +74,17 @@ final class TokenStore {
 	}
 
 	/**
-	 * Odczytuje parę tokenów danej roli.
+	 * Odczytuje parę tokenów danego slotu.
 	 *
-	 * @param string $role Jedna ze stałych `self::ROLE_READ` / `self::ROLE_WRITE`.
+	 * @param string $environment Jedna ze stałych `Environment::SANDBOX` / `Environment::PRODUCTION`.
+	 * @param string $role        Jedna ze stałych `Environment::ROLE_READ` / `Environment::ROLE_WRITE`.
 	 * @return TokenSet|null Null, gdy brak zapisanych tokenów albo są
 	 *                       niedeszyfrowalne/uszkodzone.
+	 *
+	 * @throws InvalidArgumentException Gdy slot (środowisko/rola) spoza dozwolonego zbioru.
 	 */
-	public function get( string $role ): ?TokenSet {
-		$option = self::option_key( $role );
+	public function get( string $environment, string $role ): ?TokenSet {
+		$option = self::option_key( $environment, $role );
 
 		$stored = get_option( $option, '' );
 
@@ -107,23 +108,29 @@ final class TokenStore {
 	}
 
 	/**
-	 * Czy dla danej roli istnieje zapisany (i deszyfrowalny) zestaw tokenów.
+	 * Czy dla danego slotu istnieje zapisany (i deszyfrowalny) zestaw tokenów.
 	 *
-	 * @param string $role Jedna ze stałych `self::ROLE_READ` / `self::ROLE_WRITE`.
+	 * @param string $environment Jedna ze stałych `Environment::SANDBOX` / `Environment::PRODUCTION`.
+	 * @param string $role        Jedna ze stałych `Environment::ROLE_READ` / `Environment::ROLE_WRITE`.
 	 * @return bool
+	 *
+	 * @throws InvalidArgumentException Gdy slot (środowisko/rola) spoza dozwolonego zbioru.
 	 */
-	public function has( string $role ): bool {
-		return null !== $this->get( $role );
+	public function has( string $environment, string $role ): bool {
+		return null !== $this->get( $environment, $role );
 	}
 
 	/**
-	 * Usuwa parę tokenów danej roli (np. „Rozłącz" w P-2.2).
+	 * Usuwa parę tokenów danego slotu (np. „Rozłącz" w P-2.2).
 	 *
-	 * @param string $role Jedna ze stałych `self::ROLE_READ` / `self::ROLE_WRITE`.
+	 * @param string $environment Jedna ze stałych `Environment::SANDBOX` / `Environment::PRODUCTION`.
+	 * @param string $role        Jedna ze stałych `Environment::ROLE_READ` / `Environment::ROLE_WRITE`.
 	 * @return bool True, gdy opcja została usunięta (lub jej nie było).
+	 *
+	 * @throws InvalidArgumentException Gdy slot (środowisko/rola) spoza dozwolonego zbioru.
 	 */
-	public function delete( string $role ): bool {
-		$option = self::option_key( $role );
+	public function delete( string $environment, string $role ): bool {
+		$option = self::option_key( $environment, $role );
 
 		if ( false === get_option( $option, false ) ) {
 			return true; // Nic do usunięcia — stan docelowy osiągnięty.
@@ -133,22 +140,30 @@ final class TokenStore {
 	}
 
 	/**
-	 * Waliduje rolę i zwraca klucz opcji WP.
+	 * Waliduje slot (środowisko × rola) i zwraca klucz opcji WP.
 	 *
-	 * Nieznana rola to błąd programisty (nie stan runtime) → wyjątek.
+	 * Nieznane środowisko/rola to błąd programisty (nie stan runtime) → wyjątek.
+	 * Słownik obu osi pochodzi z {@see Environment} (jedno źródło prawdy).
 	 *
-	 * @param string $role Rola do walidacji.
+	 * @param string $environment Środowisko do walidacji.
+	 * @param string $role        Rola do walidacji.
 	 * @return string Klucz opcji WP.
 	 *
-	 * @throws InvalidArgumentException Gdy rola spoza `self::ROLE_READ`/`self::ROLE_WRITE`.
+	 * @throws InvalidArgumentException Gdy środowisko lub rola spoza dozwolonego zbioru.
 	 */
-	private static function option_key( string $role ): string {
-		if ( ! isset( self::OPTION_KEYS[ $role ] ) ) {
+	private static function option_key( string $environment, string $role ): string {
+		if ( Environment::SANDBOX !== $environment && Environment::PRODUCTION !== $environment ) {
+			throw new InvalidArgumentException(
+				sprintf( 'Nieznane środowisko Allegro: "%s".', $environment )
+			);
+		}
+
+		if ( Environment::ROLE_READ !== $role && Environment::ROLE_WRITE !== $role ) {
 			throw new InvalidArgumentException(
 				sprintf( 'Nieznana rola tokenu Allegro: "%s".', $role )
 			);
 		}
 
-		return self::OPTION_KEYS[ $role ];
+		return self::OPTION_PREFIX . $environment . '_' . $role;
 	}
 }

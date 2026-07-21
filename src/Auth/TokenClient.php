@@ -29,8 +29,10 @@ use WP_Error;
  * Tak to tu realizujemy; dokładny zestaw parametrów refreshu potwierdzi P-2.3 na
  * żywym sandboxie (to jego zakres — realne odświeżanie).
  *
- * Klient NIE zna ról read/write ani zakresów — dostaje sekrety środowiska i
- * zwraca `TokenSet`; o tym, którą parę zapisać, decyduje wołający (P-2.2/P-2.3).
+ * Rewizja P-2.1b: klient jest związany z JEDNYM slotem — instancją `Environment`
+ * WSKAZANĄ przez wołającego (nie wykrytą globalnie, D-2.G2) plus rolą, bo sekrety
+ * są per (środowisko, rola, D-2.G3). Nie zna zakresów; zwraca `TokenSet`, a o tym,
+ * do którego slotu magazynu go zapisać, decyduje wołający (P-2.2/P-2.3).
  */
 final class TokenClient {
 
@@ -40,17 +42,27 @@ final class TokenClient {
 	private const REQUEST_TIMEOUT = 15;
 
 	/**
-	 * Konfiguracja środowiska (endpoint + sekrety).
+	 * Konfiguracja środowiska (endpoint + sekrety per rola).
 	 *
 	 * @var Environment
 	 */
 	private $environment;
 
 	/**
-	 * @param Environment $environment Środowisko (sandbox/prod) z sekretami.
+	 * Rola slotu (`Environment::ROLE_READ` / `Environment::ROLE_WRITE`) — wybiera
+	 * właściwą parę sekretów aplikacji w obrębie środowiska.
+	 *
+	 * @var string
 	 */
-	public function __construct( Environment $environment ) {
+	private $role;
+
+	/**
+	 * @param Environment $environment Środowisko (sandbox/prod) — WSKAZANE przez wołającego.
+	 * @param string      $role        Rola slotu (`Environment::ROLE_READ` / `Environment::ROLE_WRITE`).
+	 */
+	public function __construct( Environment $environment, string $role ) {
 		$this->environment = $environment;
+		$this->role        = $role;
 	}
 
 	/**
@@ -94,13 +106,14 @@ final class TokenClient {
 	 * @return TokenSet|WP_Error
 	 */
 	private function request_token( array $body ) {
-		if ( ! $this->environment->has_credentials() ) {
+		if ( ! $this->environment->has_credentials( $this->role ) ) {
 			return new WP_Error(
 				'qutlet_allegro_missing_credentials',
 				sprintf(
-					/* translators: %s: environment identifier (sandbox/production). */
-					__( 'Brak sekretów Allegro (client_id/client_secret) w wp-config.php dla środowiska „%s".', 'qutlet-allegro' ),
-					$this->environment->type()
+					/* translators: 1: environment identifier (sandbox/production), 2: role (read/write). */
+					__( 'Brak sekretów Allegro (client_id/client_secret) w wp-config.php dla środowiska „%1$s" / roli „%2$s".', 'qutlet-allegro' ),
+					$this->environment->type(),
+					$this->role
 				)
 			);
 		}
@@ -111,7 +124,7 @@ final class TokenClient {
 				'timeout' => self::REQUEST_TIMEOUT,
 				'headers' => array(
 					'Authorization' => 'Basic ' . base64_encode(
-						$this->environment->client_id() . ':' . $this->environment->client_secret()
+						$this->environment->client_id( $this->role ) . ':' . $this->environment->client_secret( $this->role )
 					),
 					'Content-Type'  => 'application/x-www-form-urlencoded',
 					'Accept'        => 'application/json',
