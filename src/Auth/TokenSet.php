@@ -209,4 +209,23 @@ final class TokenSet {
 	public function is_access_expired( int $now, int $leeway = 0 ): bool {
 		return $now >= ( $this->expires_at - $leeway );
 	}
+
+	/**
+	 * Czy refresh token jest już (orientacyjnie) przeterminowany.
+	 *
+	 * UWAGA: `refresh_expires_at` to wartość POMOCNICZA (Allegro nie zwraca czasu
+	 * życia refresh tokenu — patrz docblock klasy), więc ta metoda odpowiada tylko
+	 * na pytanie „czy nasze górne oszacowanie 3 mies. już minęło". P-2.3 używa jej
+	 * do decyzji „refresh sam się starzeje → potrzebna ponowna autoryzacja (P-2.2)",
+	 * NIE do decyzji o samym odświeżeniu access tokenu (od tego jest
+	 * {@see self::is_access_expired()}).
+	 *
+	 * @param int $now    Chwila odniesienia (unix ts).
+	 * @param int $leeway Margines w sekundach — traktuj jako wygasły na tyle
+	 *                    wcześniej. Domyślnie 0.
+	 * @return bool
+	 */
+	public function is_refresh_expired( int $now, int $leeway = 0 ): bool {
+		return $now >= ( $this->refresh_expires_at - $leeway );
+	}
 }
