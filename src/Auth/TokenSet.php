@@ -39,9 +39,11 @@ final class TokenSet {
 	/**
 	 * Pomocniczy czas życia refresh tokenu (3 miesiące ≈ 90 dni), w sekundach.
 	 * Manual Allegro: refresh ważny „do 3 miesięcy". Wartość orientacyjna —
-	 * patrz docblock klasy.
+	 * patrz docblock klasy. Liczba jawna (90 × 86400), NIE `DAY_IN_SECONDS` —
+	 * DTO ma być niezależny od WP (jak deklaruje docblock klasy) i testowalny
+	 * w izolacji.
 	 */
-	public const REFRESH_TTL_SECONDS = 90 * DAY_IN_SECONDS;
+	public const REFRESH_TTL_SECONDS = 90 * 86400;
 
 	/**
 	 * @var string
