@@ -45,13 +45,22 @@ require_once $qutlet_allegro_autoload;
 // Slice'y synchronizacji uruchamiamy dopiero, gdy twarde zależności są obecne (D-G5).
 add_action( 'plugins_loaded', __NAMESPACE__ . '\\bootstrap' );
 
+/*
+ * Dezaktywacja: usuń zdarzenie WP-Cron odświeżania tokenów (P-2.3), żeby nie
+ * zostawić osieroconego harmonogramu. Rejestrujemy hook bezwarunkowo (po
+ * załadowaniu autoloadera) — sprzątanie musi działać niezależnie od obecności
+ * twardych zależności. Zaplanowanie zdarzenia jest samonaprawialne (na `init`,
+ * patrz Auth\RefreshScheduler), więc hooka aktywacji nie potrzebujemy.
+ */
+register_deactivation_hook( __FILE__, __NAMESPACE__ . '\\Auth\\RefreshScheduler::unschedule' );
+
 /**
  * Punkt wejścia wtyczki. Uruchamiany na `plugins_loaded`.
  *
  * Najpierw weryfikujemy OBECNOŚĆ twardych zależności (D-G5) i przy braku robimy
  * no-op + notice. Gdy są obecne — rejestrujemy slice'y wtyczki. Aktualnie: slice
- * `Auth/` (P-2.2 — flow OAuth). Komend WP-CLI wciąż nie rejestrujemy (D-0.3.1 —
- * dopiero przy właściwej synchronizacji).
+ * `Auth/` — flow OAuth (P-2.2) oraz odświeżanie/rotacja tokenów (P-2.3). Komend
+ * WP-CLI wciąż nie rejestrujemy (D-0.3.1 — dopiero przy właściwej synchronizacji).
  *
  * @return void
  */
@@ -79,6 +88,16 @@ function bootstrap(): void {
 	 * 10, więc allegro np. priorytet > 10) lub na dedykowanym hooku „core gotowe".
 	 */
 	( new Auth\OAuthController() )->register();
+
+	/*
+	 * Slice Auth (P-2.3): odświeżanie/rotacja tokenów. Rejestruje zdarzenie WP-Cron
+	 * (`qutlet_allegro_refresh_tokens`) + samonaprawialne zaplanowanie na `init`.
+	 * Cron jest zabezpieczeniem; podstawą jest odświeżanie on-demand
+	 * (`Auth\TokenRefresher::get_valid()`), którego użyją konsumenci FAZY 3/6.
+	 * Świadomie WP-Cron, nie systemowy — rozgraniczenie względem D-6.G1 opisane w
+	 * `Auth\RefreshScheduler`.
+	 */
+	( new Auth\RefreshScheduler() )->register();
 }
 
 /**
