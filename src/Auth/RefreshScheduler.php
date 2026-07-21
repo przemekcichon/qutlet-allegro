@@ -114,7 +114,12 @@ final class RefreshScheduler {
 				continue; // Access ma jeszcze duży zapas — nie ruszamy jednorazowego refresh.
 			}
 
-			$result = $refresher->refresh( $environment, $role );
+			// Przekazujemy TEN SAM próg (CRON_THRESHOLD) do refresh(), żeby jego
+			// podwójne sprawdzenie po zamku używało tego samego okna co decyzja
+			// wyżej. Bez tego refresh() użyłby domyślnego ACCESS_LEEWAY (5 min) i
+			// oddałby token bez odświeżenia dla wszystkiego, co wygasa >5 min od
+			// teraz — czyli zwężałby okno crona z 2 h do 5 min i niweczył bezpiecznik.
+			$result = $refresher->refresh( $environment, $role, self::CRON_THRESHOLD );
 
 			/**
 			 * Wynik proaktywnego odświeżenia slotu przez cron (obserwowalność).
