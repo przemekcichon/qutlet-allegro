@@ -24,10 +24,11 @@ use WP_Error;
  * - authorization_code: `grant_type=authorization_code`, `code`, `redirect_uri`;
  * - refresh_token:      `grant_type=refresh_token`, `refresh_token`.
  *
- * UWAGA (do potwierdzenia w P-2.3): manual (dwukrotnie odczytany) pokazuje ciało
- * refreshu WYŁĄCZNIE jako `grant_type` + `refresh_token` (bez `redirect_uri`).
- * Tak to tu realizujemy; dokładny zestaw parametrów refreshu potwierdzi P-2.3 na
- * żywym sandboxie (to jego zakres — realne odświeżanie).
+ * UWAGA (POTWIERDZONE w P-2.3 na żywym sandboxie, 2026-07-22): manual pokazuje
+ * ciało refreshu WYŁĄCZNIE jako `grant_type` + `refresh_token` (bez `redirect_uri`)
+ * — i tak działa: realne odświeżenie slotów `sandbox/read` i `sandbox/write`
+ * zwróciło HTTP 200 z nową parą tokenów (rotacja jednorazowego refresh) dokładnie
+ * przy tym zestawie parametrów.
  *
  * Rewizja P-2.1b: klient jest związany z JEDNYM slotem — instancją `Environment`
  * WSKAZANĄ przez wołającego (nie wykrytą globalnie, D-2.G2) plus rolą, bo sekrety
