@@ -101,12 +101,14 @@ function bootstrap(): void {
 	( new Auth\RefreshScheduler() )->register();
 
 	/*
-	 * Slice ApiSamples (P-3.1a): komenda WP-CLI pobierająca surowe zwrotki ofert
-	 * Allegro do plików (materiał wejściowy dla zredagowanych próbek P-3.1b w meta).
-	 * Rejestrowana WYŁĄCZNIE w kontekście WP-CLI — na froncie/adminie nieobecna.
+	 * Slice ApiSamples (P-3.1a/P-3.2a): komendy WP-CLI pobierające surowe zwrotki
+	 * Allegro do plików (materiał wejściowy dla zredagowanych próbek w meta:
+	 * P-3.1b oferty, P-3.2b kategorie). Rejestrowane WYŁĄCZNIE w kontekście WP-CLI —
+	 * na froncie/adminie nieobecne.
 	 */
 	if ( defined( 'WP_CLI' ) && \WP_CLI ) {
 		\WP_CLI::add_command( 'qutlet-allegro sample-offers', ApiSamples\OfferSamplesCommand::class );
+		\WP_CLI::add_command( 'qutlet-allegro sample-categories', ApiSamples\CategorySamplesCommand::class );
 	}
 }
 
