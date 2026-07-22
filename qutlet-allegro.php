@@ -118,6 +118,7 @@ function bootstrap(): void {
 		\WP_CLI::add_command( 'qutlet-allegro sample-categories', ApiSamples\CategorySamplesCommand::class );
 		\WP_CLI::add_command( 'qutlet-allegro sample-orders', ApiSamples\OrderSamplesCommand::class );
 		\WP_CLI::add_command( 'qutlet-allegro snapshot-offers', SandboxSeed\OfferSnapshotCommand::class );
+		\WP_CLI::add_command( 'qutlet-allegro sandbox-preflight', SandboxSeed\SandboxPreflightCommand::class );
 	}
 }
 
