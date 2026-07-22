@@ -106,10 +106,18 @@ function bootstrap(): void {
 	 * P-3.1b oferty, P-3.2b kategorie, P-3.3b zamówienia). Rejestrowane WYŁĄCZNIE
 	 * w kontekście WP-CLI — na froncie/adminie nieobecne.
 	 */
+	/*
+	 * Slice SandboxSeed (P-3A.1a): komenda WP-CLI robiąca trwały snapshot ofert
+	 * produkcyjnych — materiał dla zasiewu sandboxa (P-3A.2). Osobny slice od
+	 * `ApiSamples/`, bo to inny produkt i inny reżim danych: tamten zbiera materiał
+	 * na ZREDAGOWANE próbki do repo, ten kompletne SUROWE dane, które do repo nie
+	 * trafiają nigdy (D-3A.G3). Również wyłącznie pod WP-CLI.
+	 */
 	if ( defined( 'WP_CLI' ) && \WP_CLI ) {
 		\WP_CLI::add_command( 'qutlet-allegro sample-offers', ApiSamples\OfferSamplesCommand::class );
 		\WP_CLI::add_command( 'qutlet-allegro sample-categories', ApiSamples\CategorySamplesCommand::class );
 		\WP_CLI::add_command( 'qutlet-allegro sample-orders', ApiSamples\OrderSamplesCommand::class );
+		\WP_CLI::add_command( 'qutlet-allegro snapshot-offers', SandboxSeed\OfferSnapshotCommand::class );
 	}
 }
 
