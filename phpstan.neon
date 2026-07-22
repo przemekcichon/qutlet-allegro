@@ -11,3 +11,6 @@ parameters:
         - src/
     excludePaths:
         - vendor/
+    # Stuby WP-CLI (klasa WP_CLI, WP_CLI\Utils\*) — komenda ApiSamples (P-3.1a).
+    scanFiles:
+        - vendor/php-stubs/wp-cli-stubs/wp-cli-stubs.php
