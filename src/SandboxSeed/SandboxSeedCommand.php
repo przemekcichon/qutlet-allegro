@@ -92,6 +92,12 @@ final class SandboxSeedCommand {
 	private const MAX_INDEX_PAGES = 200;
 
 	/**
+	 * Ile metod dostawy spróbować przy zakładaniu cennika. Sandbox zwraca ich 571, więc bez limitu
+	 * jedno nieudane dopasowanie zamieniałoby się w setki żądań (i timeout mostu MCP).
+	 */
+	private const MAX_RATE_ATTEMPTS = 5;
+
+	/**
 	 * Zasiewa sandbox ofertami odtworzonymi ze snapshotu produkcji.
 	 *
 	 * ## OPTIONS
@@ -188,10 +194,12 @@ final class SandboxSeedCommand {
 		}
 
 		$api    = $environment->api_base_url();
+		$upload = $environment->upload_base_url();
 		$access = $this->access_token( $environment->type(), (bool) get_flag_value( $assoc_args, 'refresh-token', false ) );
 
 		$shipping_rate = $this->resolve_shipping_rate( $api, $access, (string) get_flag_value( $assoc_args, 'shipping-rate', '' ) );
 		$after_sales   = $this->ensure_after_sales( $api, $access, $dry_run );
+		$producer      = $this->ensure_responsible_producer( $api, $access, $dry_run );
 		$index         = $this->build_offer_index( $api, $access );
 
 		WP_CLI::log(
@@ -245,9 +253,9 @@ final class SandboxSeedCommand {
 			$existing = $index[ $offer_id ] ?? null;
 
 			if ( null !== $existing ) {
-				$record = $this->reconcile_existing( $api, $access, $offer, $existing, $refresh, $dry_run );
+				$record = $this->reconcile_existing( $api, $upload, $access, $offer, $existing, $refresh, $dry_run );
 			} else {
-				$record = $this->create_offer( $api, $access, $cache, $offer, $id_map, $shipping_rate, $after_sales, $status, $dry_run );
+				$record = $this->create_offer( $api, $upload, $access, $cache, $offer, $id_map, $shipping_rate, $after_sales, $producer, $status, $dry_run );
 			}
 
 			++$totals[ $this->bucket_of( (string) $record['action'] ) ];
@@ -378,6 +386,57 @@ final class SandboxSeedCommand {
 		return array(
 			'returnPolicy'     => array( 'id' => $return_policy ),
 			'impliedWarranty'  => array( 'id' => $implied_warranty ),
+		);
+	}
+
+	/**
+	 * Zapewnia obecność producenta odpowiedzialnego (GPSR) na koncie sandboxowym i zwraca jego id.
+	 *
+	 * Allegro wymaga go dla każdego produktu w ofercie, a wskazać go można TYLKO przez zasób konta:
+	 * wariant `NAME` sprawdza nazwę w słowniku konta, więc nie da się jej wymyślić z danych oferty
+	 * (422 `RESPONSIBLE_PRODUCER_NAME_DOES_NOT_EXIST`). Snapshot niesie 89 produkcyjnych UUID-ów,
+	 * których sandbox nie zna, więc zakładamy JEDNEGO producenta „zasiewowego" i podpinamy go pod
+	 * wszystkie oferty. Idempotentnie: jeśli konto ma już jakiegokolwiek, używamy pierwszego.
+	 *
+	 * Dane są SYNTETYCZNE — to środowisko testowe, a nie miejsce na prawdziwe dane teleadresowe.
+	 *
+	 * @param string $api     Baza API.
+	 * @param string $access  Access token.
+	 * @param bool   $dry_run Czy tylko sprawdzić stan.
+	 * @return string Id producenta (pusty string w dry-run, gdy trzeba by go dopiero założyć).
+	 */
+	private function ensure_responsible_producer( string $api, string $access, bool $dry_run ): string {
+		$existing = $this->first_existing( $api, $access, '/sale/responsible-producers', 'responsibleProducers' );
+
+		if ( null !== $existing ) {
+			return $existing;
+		}
+
+		if ( $dry_run ) {
+			WP_CLI::log( '  (dry-run) konto sandboxowe nie ma producenta odpowiedzialnego — przebieg właściwy by go założył.' );
+
+			return '';
+		}
+
+		return $this->create_account_condition(
+			$api,
+			$access,
+			'/sale/responsible-producers',
+			array(
+				'name'         => 'Qutlet sandbox seed',
+				'producerData' => array(
+					'tradeName' => 'Qutlet Sandbox',
+					'address'   => array(
+						'countryCode' => 'PL',
+						'street'      => 'Testowa 1',
+						'postalCode'  => '32-091',
+						'city'        => 'Wilczkowice',
+					),
+					'contact'   => array(
+						'email' => 'sandbox@qutlet.pl',
+					),
+				),
+			)
 		);
 	}
 
@@ -522,17 +581,19 @@ final class SandboxSeedCommand {
 	 * Tworzy ofertę w sandboxie na podstawie oferty ze snapshotu.
 	 *
 	 * @param string               $api           Baza API.
+	 * @param string               $upload        Baza hosta uploadu zdjęć.
 	 * @param string               $access        Access token.
 	 * @param string               $cache         Katalog cache schematów kategorii.
 	 * @param array<string,mixed>  $offer         Oferta ze snapshotu (surowa zwrotka produkcji).
 	 * @param IdMap                $id_map        Mapowanie prod→sandbox.
 	 * @param string               $shipping_rate Cennik dostawy konta sandboxowego.
 	 * @param array{returnPolicy:array{id:string},impliedWarranty:array{id:string}}|null $after_sales Warunki konta.
+	 * @param string               $producer      Id producenta odpowiedzialnego (GPSR) na koncie.
 	 * @param string               $status        Status publikacji.
 	 * @param bool                 $dry_run       Czy tylko zbudować payload.
 	 * @return array<string,mixed> Wpis do raportu.
 	 */
-	private function create_offer( string $api, string $access, string $cache, array $offer, IdMap $id_map, string $shipping_rate, ?array $after_sales, string $status, bool $dry_run ): array {
+	private function create_offer( string $api, string $upload, string $access, string $cache, array $offer, IdMap $id_map, string $shipping_rate, ?array $after_sales, string $producer, string $status, bool $dry_run ): array {
 		$production_category = isset( $offer['category']['id'] ) ? (string) $offer['category']['id'] : '';
 		$category            = '' !== $production_category ? $id_map->category( $production_category ) : null;
 
@@ -546,11 +607,60 @@ final class SandboxSeedCommand {
 		$schema     = $this->category_schema( $api, $access, $cache, $category );
 		$parameters = $this->build_parameters( $offer, $id_map, $schema );
 
+		/*
+		 * Zdjęcia PRZENOSIMY, zanim zbudujemy payload: produkcyjny adres `a.allegroimg.com` jest
+		 * odrzucany (422 `OfferImagesNotFoundException`), a definicja produktu potrzebuje już
+		 * adresów sandboxowych. W dry-run zostają adresy źródłowe — próba nie wysyła niczego.
+		 */
+		$transferred = array();
+		$images      = $this->image_urls( $offer );
+
+		if ( ! $dry_run ) {
+			$images = $this->transfer_images( $upload, $access, $images, $transferred );
+
+			if ( array() === $images ) {
+				return array(
+					'action' => 'failed',
+					'detail' => 'nie udało się przenieść ani jednego zdjęcia galerii',
+				);
+			}
+		}
+
 		$payload = array(
 			'name'        => (string) ( $offer['name'] ?? '' ),
 			'category'    => array( 'id' => $category ),
 			'parameters'  => $parameters['parameters'],
-			'images'      => $this->image_urls( $offer ),
+			'images'      => $images,
+			'productSet'  => array(
+				array(
+					'product'             => array(
+						'name'       => (string) ( $offer['name'] ?? '' ),
+						'category'   => array( 'id' => $category ),
+						'parameters' => $parameters['product'],
+						'images'     => $images,
+					),
+					/*
+					 * GPSR: Allegro wymaga dla KAŻDEGO produktu w ofercie producenta
+					 * odpowiedzialnego i informacji o bezpieczeństwie (422
+					 * `RESPONSIBLE_PRODUCER_NOT_SPECIFIED` + `SAFETY_INFO_NOT_DEFINED`).
+					 *
+					 * Producenta wskazujemy przez `ID` zasobu KONTA. Wariant `NAME` odpada, mimo że
+					 * wygląda wygodniej: nazwa musi wskazywać producenta JUŻ zarejestrowanego w
+					 * słowniku konta (422 `RESPONSIBLE_PRODUCER_NAME_DOES_NOT_EXIST`), więc nie da
+					 * się jej wyprowadzić z danych oferty. Produkcyjne UUID-y (89 sztuk) w sandboxie
+					 * nie istnieją, dlatego zasiew zakłada JEDNEGO producenta na koncie i podpina go
+					 * pod wszystkie oferty — ta sama reguła co przy warunkach konta (D-3A.2.3).
+					 */
+					'responsibleProducer' => array(
+						'type' => 'ID',
+						'id'   => $producer,
+					),
+					'safetyInformation'   => array(
+						'type'        => 'TEXT',
+						'description' => $this->safety_information( $offer ),
+					),
+				),
+			),
 			'sellingMode' => $this->selling_mode( $offer ),
 			'stock'       => $this->stock( $offer ),
 			'publication' => array( 'status' => $status ),
@@ -589,14 +699,29 @@ final class SandboxSeedCommand {
 		if ( $dry_run ) {
 			return array(
 				'action'            => 'would-create',
-				'detail'            => sprintf( '%d parametrów, %d zdjęć', count( $payload['parameters'] ), count( $payload['images'] ) ),
+				'detail'            => sprintf(
+					'%d parametrów oferty, %d parametrów produktu, %d zdjęć',
+					count( $payload['parameters'] ),
+					count( $parameters['product'] ),
+					count( $payload['images'] )
+				),
 				'dropped_parameters' => $parameters['dropped'],
 			);
 		}
 
+		if ( isset( $payload['description'] ) ) {
+			$payload['description'] = $this->rewrite_description_images( $payload['description'], $upload, $access, $transferred );
+		}
+
 		$response = $this->send( 'POST', $api . '/sale/product-offers', $access, $payload );
 
-		if ( 201 !== $response['status'] && 200 !== $response['status'] ) {
+		/*
+		 * 202 to też SUKCES, nie błąd: oferta z definicją NOWEGO produktu wraca jako „przyjęte",
+		 * bo produkt idzie do katalogu ze statusem `PROPOSED` i czeka na przetworzenie przez
+		 * Allegro. Traktowanie 202 jako porażki oznaczałoby, że zasiew tworzy oferty i sam o tym
+		 * nie wie — a przy kolejnym przebiegu zobaczyłby je w indeksie jako „już istnieją".
+		 */
+		if ( ! in_array( $response['status'], array( 200, 201, 202 ), true ) ) {
 			$this->abort_on_account_refusal( $response );
 
 			return array(
@@ -609,6 +734,9 @@ final class SandboxSeedCommand {
 		return array(
 			'action'             => 'created',
 			'sandbox_offer_id'   => isset( $response['data']['id'] ) ? (string) $response['data']['id'] : null,
+			'product_status'     => isset( $response['data']['productSet'][0]['product']['publication']['status'] )
+				? (string) $response['data']['productSet'][0]['product']['publication']['status']
+				: null,
 			'dropped_parameters' => $parameters['dropped'],
 		);
 	}
@@ -618,6 +746,7 @@ final class SandboxSeedCommand {
 	 * serwowane zdjęcie), a nie dlatego, że istnieje (D-3A.G4).
 	 *
 	 * @param string                                    $api      Baza API.
+	 * @param string                                    $upload   Baza hosta uploadu zdjec.
 	 * @param string                                    $access   Access token.
 	 * @param array<string,mixed>                       $offer    Oferta ze snapshotu.
 	 * @param array{id:string,primary_image:string|null} $existing Wpis indeksu sandboxa.
@@ -625,7 +754,7 @@ final class SandboxSeedCommand {
 	 * @param bool                                      $dry_run  Czy tylko pokazać zamiar.
 	 * @return array<string,mixed> Wpis do raportu.
 	 */
-	private function reconcile_existing( string $api, string $access, array $offer, array $existing, bool $refresh, bool $dry_run ): array {
+	private function reconcile_existing( string $api, string $upload, string $access, array $offer, array $existing, bool $refresh, bool $dry_run ): array {
 		$images = $this->image_urls( $offer );
 
 		if ( array() === $images ) {
@@ -648,6 +777,17 @@ final class SandboxSeedCommand {
 				'action'           => 'would-refresh-images',
 				'sandbox_offer_id' => $existing['id'],
 				'detail'           => sprintf( '%d zdjęć', count( $images ) ),
+			);
+		}
+
+		$transferred = array();
+		$images      = $this->transfer_images( $upload, $access, $images, $transferred );
+
+		if ( array() === $images ) {
+			return array(
+				'action'           => 'failed',
+				'sandbox_offer_id' => $existing['id'],
+				'detail'           => 'nie udalo sie przeniesc ani jednego zdjecia przy odswiezaniu',
 			);
 		}
 
@@ -674,15 +814,16 @@ final class SandboxSeedCommand {
 	}
 
 	/**
-	 * Składa parametry oferty: te z poziomu oferty PLUS te z produktu (bo produktu w sandboxie
-	 * nie ma), przetłumaczone przez mapę i przefiltrowane schematem kategorii sandboxa.
-	 * Parametr, którego kategoria nie zna albo którego wartości nie ma w jej słowniku, wypada —
-	 * wysłanie go i tak skończyłoby się odrzuceniem całej oferty.
+	 * Składa parametry i ROZDZIELA je na dwie sekcje wymagane przez Allegro: parametry oferty
+	 * i parametry produktu. Źródłem są oba poziomy snapshotu (oferta + produkt), przetłumaczone
+	 * przez mapę i przefiltrowane schematem kategorii sandboxa. Parametr, którego kategoria nie
+	 * zna albo którego wartości nie ma w jej słowniku, wypada — wysłanie go i tak skończyłoby
+	 * się odrzuceniem całej oferty.
 	 *
 	 * @param array<string,mixed>                                                   $offer  Oferta ze snapshotu.
 	 * @param IdMap                                                                 $id_map Mapowanie.
 	 * @param array<array-key,array{dictionary:array<int,string>,type:string,describesProduct:bool}> $schema Schemat parametrów kategorii sandboxa.
-	 * @return array{parameters:array<int,array<string,mixed>>,dropped:array<array-key,string>}
+	 * @return array{parameters:array<int,array<string,mixed>>,product:array<int,array<string,mixed>>,dropped:array<array-key,string>}
 	 */
 	private function build_parameters( array $offer, IdMap $id_map, array $schema ): array {
 		$source = array();
@@ -700,6 +841,7 @@ final class SandboxSeedCommand {
 		}
 
 		$built   = array();
+		$product = array();
 		$dropped = array();
 
 		foreach ( $source as $parameter ) {
@@ -722,18 +864,6 @@ final class SandboxSeedCommand {
 				continue;
 			}
 
-			/*
-			 * Parametry sekcji PRODUKTU (`options.describesProduct`) nie mają prawa jechać w
-			 * `parameters` oferty — Allegro odrzuca całą ofertę błędem `ParameterCategoryException`
-			 * („should not be specified as in section `offer`"), co potwierdziliśmy na żywym
-			 * sandboxie parametrem `224017 Kod producenta`. Skoro oferta jest kategoryjna (nie ma
-			 * do czego dowiązać produktu), te parametry po prostu nie mają gdzie usiąść.
-			 */
-			if ( $schema[ $mapped ]['describesProduct'] ) {
-				$dropped[ $production_id ] = 'parametr sekcji produktu — niedozwolony w ofercie';
-
-				continue;
-			}
 
 			$entry = $this->parameter_entry( $parameter, $mapped, $id_map, $schema[ $mapped ] );
 
@@ -744,11 +874,27 @@ final class SandboxSeedCommand {
 			}
 
 			unset( $dropped[ $production_id ] );
+
+			/*
+			 * Parametr trafia do SEKCJI, do której należy wg schematu kategorii
+			 * (`options.describesProduct`). Allegro pilnuje tego z obu stron naraz: parametr
+			 * produktu wysłany w `parameters` oferty daje 422 `ParameterCategoryException`
+			 * („should not be specified as in section `offer`"), a jego BRAK — 422
+			 * `MissingRequiredParameters`. Obie odpowiedzi widzieliśmy na żywym sandboxie na tej
+			 * samej ofercie; dlatego oferta musi nieść definicję produktu, a nie samą kategorię.
+			 */
+			if ( $schema[ $mapped ]['describesProduct'] ) {
+				$product[ $mapped ] = $entry;
+
+				continue;
+			}
+
 			$built[ $mapped ] = $entry;
 		}
 
 		return array(
 			'parameters' => array_values( $built ),
+			'product'    => array_values( $product ),
 			'dropped'    => $dropped,
 		);
 	}
@@ -974,16 +1120,21 @@ final class SandboxSeedCommand {
 			);
 		}
 
-		$rates = array();
+		$rates    = array();
+		$ordinary = array();
 
 		foreach ( (array) ( $response['data']['shippingRates'] ?? array() ) as $rate ) {
-			if ( is_array( $rate ) && isset( $rate['id'] ) ) {
-				$rates[] = (string) $rate['id'];
+			if ( ! is_array( $rate ) || ! isset( $rate['id'] ) ) {
+				continue;
 			}
-		}
 
-		if ( array() === $rates ) {
-			WP_CLI::error( 'Konto sandboxowe nie ma ani jednego cennika dostawy — oferty nie przejdą walidacji.' );
+			$id       = (string) $rate['id'];
+			$rates[]  = $id;
+			$is_ffm   = isset( $rate['features']['isFulfillment'] ) && true === $rate['features']['isFulfillment'];
+
+			if ( ! $is_ffm ) {
+				$ordinary[] = $id;
+			}
 		}
 
 		if ( '' !== $requested ) {
@@ -994,7 +1145,262 @@ final class SandboxSeedCommand {
 			return $requested;
 		}
 
-		return $rates[0];
+		if ( array() !== $ordinary ) {
+			return $ordinary[0];
+		}
+
+		/*
+		 * Konto sandboxowe dostaje od Allegro WYŁĄCZNIE cenniki One Fulfillment (7/7 na naszym
+		 * koncie). Oferta wpięta w taki cennik wchodzi w reżim fulfillmentu i przestaje pasować do
+		 * naszych danych — potwierdzone 422: `delivery.handlingTime` musi być 24 h, `location` musi
+		 * wskazywać magazyn Allegro, a polityka zwrotów musi być fulfillmentowa. Zamiast udawać, że
+		 * outletowy towar leży w magazynie Allegro, zakładamy ZWYKŁY cennik — to samo rozstrzygnięcie
+		 * co przy warunkach posprzedażowych (D-3A.2.3): brakujący zasób konta zasiew tworzy sam.
+		 */
+		return $this->create_shipping_rate( $api, $access );
+	}
+
+	/**
+	 * Zakłada w sandboxie zwykły (nie-fulfillmentowy) cennik dostawy i zwraca jego id.
+	 *
+	 * Metodę dostawy i stawkę bierzemy z `GET /sale/delivery-methods`, bo stawka MUSI mieścić się w
+	 * `shippingRatesConstraints` danej metody — wpisanie „jakiejś" kwoty kończy się odrzuceniem.
+	 * Sandbox zwraca **571 metod**, więc wybór jest zawężony deterministycznie, a nie przez
+	 * POST-owanie po kolei aż coś przejdzie (pierwsza wersja tak robiła i przekraczała timeout).
+	 *
+	 * Kryteria — każde z realnej zwrotki, nie z nazwy metody:
+	 * - `shippingRatesConstraints.allowed` — metoda w ogóle dopuszczona w cennikach;
+	 * - `paymentPolicy = IN_ADVANCE` — płatność z góry (nie za pobraniem);
+	 * - marketplace `allegro-pl` oraz wysyłka PL→PL — zgodnie z ofertami snapshotu;
+	 * - `maxQuantityPerPackage.max > 1` — odsiewa odbiór osobisty, który wymaga
+	 *   skonfigurowanego punktu odbioru i nie nadaje się na domyślny cennik zasiewu.
+	 *
+	 * Stawka to DOLNA granica z ograniczeń (u Allegro `0.00`): zawsze mieści się w dopuszczalnym
+	 * przedziale, więc nie wywraca się na metodzie o innym limicie. Sandbox nie służy do
+	 * odwzorowania kosztów wysyłki, tylko do testowania przepływu.
+	 *
+	 * @param string $api    Baza API.
+	 * @param string $access Access token.
+	 * @return string UUID utworzonego cennika.
+	 */
+	private function create_shipping_rate( string $api, string $access ): string {
+		$response = $this->send( 'GET', $api . '/sale/delivery-methods', $access, null );
+
+		if ( 200 !== $response['status'] || ! is_array( $response['data'] ) ) {
+			WP_CLI::error( sprintf( 'GET /sale/delivery-methods zwróciło HTTP %d %s.', $response['status'], $this->error_detail( $response ) ), false );
+			WP_CLI::halt( 1 );
+		}
+
+		$candidates = array();
+
+		foreach ( (array) ( $response['data']['deliveryMethods'] ?? array() ) as $method ) {
+			if ( ! is_array( $method ) || ! isset( $method['id'] ) || ! $this->is_seedable_delivery_method( $method ) ) {
+				continue;
+			}
+
+			$candidates[] = $method;
+
+			if ( count( $candidates ) >= self::MAX_RATE_ATTEMPTS ) {
+				break;
+			}
+		}
+
+		if ( array() === $candidates ) {
+			WP_CLI::error( 'Żadna z metod dostawy sandboxa nie nadaje się na cennik zasiewu (PL→PL, płatność z góry).', false );
+			WP_CLI::halt( 1 );
+		}
+
+		$last = '';
+
+		foreach ( $candidates as $method ) {
+			$constraints = $method['shippingRatesConstraints'];
+			$payload     = array(
+				'name'            => 'Qutlet sandbox seed',
+				// `type` jest WYMAGANE przy tworzeniu cennika (422 `EMPTY_TYPE` bez niego), a przy
+				// `PHYSICAL` API wymaga dodatkowo kraju nadania. Towar outletowy jest fizyczny.
+				'type'            => 'PHYSICAL',
+				'dispatchCountry' => 'PL',
+				'rates'           => array(
+					array(
+						'deliveryMethod'        => array( 'id' => (string) $method['id'] ),
+						'maxQuantityPerPackage' => max( 1, min( 10, (int) $constraints['maxQuantityPerPackage']['max'] ) ),
+						'firstItemRate'         => array(
+							'amount'   => (string) $constraints['firstItemRate']['min'],
+							'currency' => (string) $constraints['firstItemRate']['currency'],
+						),
+					),
+				),
+			);
+
+			$created = $this->send( 'POST', $api . '/sale/shipping-rates', $access, $payload );
+
+			if ( ( 201 === $created['status'] || 200 === $created['status'] ) && isset( $created['data']['id'] ) ) {
+				WP_CLI::log(
+					sprintf(
+						'Założono w sandboxie cennik dostawy „%s" → %s',
+						(string) ( $method['name'] ?? '?' ),
+						(string) $created['data']['id']
+					)
+				);
+
+				return (string) $created['data']['id'];
+			}
+
+			$last = sprintf( '%s → HTTP %d %s', (string) ( $method['name'] ?? $method['id'] ), $created['status'], $this->error_detail( $created ) );
+
+			WP_CLI::warning( sprintf( 'Cennik odrzucony: %s', $last ) );
+		}
+
+		WP_CLI::error( sprintf( 'Nie udało się założyć cennika dostawy po %d próbach. Ostatnia: %s', count( $candidates ), $last ), false );
+		WP_CLI::halt( 1 );
+	}
+
+	/**
+	 * Czy metoda dostawy nadaje się na domyślny cennik zasiewu (kryteria w
+	 * {@see self::create_shipping_rate()}).
+	 *
+	 * @param array<string,mixed> $method Wpis `deliveryMethods[]`.
+	 * @return bool
+	 */
+	private function is_seedable_delivery_method( array $method ): bool {
+		$constraints = isset( $method['shippingRatesConstraints'] ) && is_array( $method['shippingRatesConstraints'] )
+			? $method['shippingRatesConstraints']
+			: array();
+
+		if ( ! isset( $constraints['allowed'] ) || true !== $constraints['allowed'] ) {
+			return false;
+		}
+
+		if ( ! isset( $constraints['firstItemRate']['min'], $constraints['firstItemRate']['currency'], $constraints['maxQuantityPerPackage']['max'] ) ) {
+			return false;
+		}
+
+		if ( 'PLN' !== $constraints['firstItemRate']['currency'] ) {
+			return false;
+		}
+
+		// Odbiór osobisty (limit 1 sztuki na paczkę) wymaga skonfigurowanego punktu — nie dla zasiewu.
+		if ( (int) $constraints['maxQuantityPerPackage']['max'] <= 1 ) {
+			return false;
+		}
+
+		if ( ! isset( $method['paymentPolicy'] ) || 'IN_ADVANCE' !== $method['paymentPolicy'] ) {
+			return false;
+		}
+
+		$marketplaces = isset( $method['marketplaces'] ) && is_array( $method['marketplaces'] ) ? $method['marketplaces'] : array();
+
+		if ( ! in_array( 'allegro-pl', $marketplaces, true ) ) {
+			return false;
+		}
+
+		return isset( $method['dispatchCountry'], $method['destinationCountry'] )
+			&& 'PL' === $method['dispatchCountry']
+			&& 'PL' === $method['destinationCountry'];
+	}
+
+	/**
+	 * Informacja o bezpieczeństwie produktu (GPSR). Snapshot ma ją dla WSZYSTKICH 555 ofert
+	 * (`productSet[].safetyInformation.description`), więc bierzemy ją verbatim; fallback istnieje
+	 * tylko po to, żeby pusty opis nie wywrócił oferty.
+	 *
+	 * @param array<string,mixed> $offer Oferta ze snapshotu.
+	 * @return string
+	 */
+	private function safety_information( array $offer ): string {
+		foreach ( (array) ( $offer['productSet'] ?? array() ) as $item ) {
+			if ( ! is_array( $item ) || ! isset( $item['safetyInformation']['description'] ) ) {
+				continue;
+			}
+
+			$description = trim( (string) $item['safetyInformation']['description'] );
+
+			if ( '' !== $description ) {
+				return $description;
+			}
+		}
+
+		return 'Brak dodatkowych informacji o bezpieczeństwie.';
+	}
+
+	/**
+	 * Przenosi zdjęcia na serwery środowiska docelowego i zwraca ICH nowe adresy.
+	 *
+	 * To jest realizacja D-3A.G4 („zasiew PRZENOSI zdjęcia"): snapshot trzyma wyłącznie URL-e
+	 * (D-3A.1.3), a Allegro nie przyjmuje obcego adresu w ofercie (422
+	 * `OfferImagesNotFoundException`) — obraz trzeba wysłać przez DEDYKOWANY host uploadu, który
+	 * sam pobierze go z podanego linku i odda adres już sandboxowy.
+	 *
+	 * Nieudany transfer POMIJA pojedyncze zdjęcie, zamiast wywracać ofertę — lepiej mieć ofertę
+	 * z pięcioma zdjęciami niż nie mieć jej wcale. Brak WSZYSTKICH obsługuje wołający.
+	 *
+	 * @param string                  $upload      Baza hosta uploadu.
+	 * @param string                  $access      Access token.
+	 * @param array<int,string>       $urls        Adresy źródłowe (produkcyjne).
+	 * @param array<array-key,string> $transferred Mapa źródło → cel (przez referencję, per oferta:
+	 *                                             ten sam obraz bywa i w galerii, i w opisie).
+	 * @return array<int,string> Adresy po przeniesieniu.
+	 */
+	private function transfer_images( string $upload, string $access, array $urls, array &$transferred ): array {
+		$moved = array();
+
+		foreach ( $urls as $url ) {
+			if ( isset( $transferred[ $url ] ) ) {
+				$moved[] = $transferred[ $url ];
+
+				continue;
+			}
+
+			$response = $this->send( 'POST', $upload . '/sale/images', $access, array( 'url' => $url ) );
+
+			if ( ( 201 !== $response['status'] && 200 !== $response['status'] ) || ! isset( $response['data']['location'] ) ) {
+				WP_CLI::warning( sprintf( 'Nie przeniosłem zdjęcia %s → HTTP %d %s', $url, $response['status'], $this->error_detail( $response ) ) );
+
+				continue;
+			}
+
+			$location            = (string) $response['data']['location'];
+			$transferred[ $url ] = $location;
+			$moved[]             = $location;
+		}
+
+		return $moved;
+	}
+
+	/**
+	 * Podmienia adresy obrazów w sekcjach opisu na przeniesione. Opis jedzie verbatim ze
+	 * snapshotu, więc niesie produkcyjne adresy — a te Allegro odrzuca tak samo jak w galerii.
+	 *
+	 * @param array<string,mixed>     $description Opis ze snapshotu.
+	 * @param string                  $upload      Baza hosta uploadu.
+	 * @param string                  $access      Access token.
+	 * @param array<array-key,string> $transferred Mapa źródło → cel (przez referencję).
+	 * @return array<string,mixed> Opis z adresami sandboxa.
+	 */
+	private function rewrite_description_images( array $description, string $upload, string $access, array &$transferred ): array {
+		if ( ! isset( $description['sections'] ) || ! is_array( $description['sections'] ) ) {
+			return $description;
+		}
+
+		foreach ( $description['sections'] as $section_index => $section ) {
+			if ( ! is_array( $section ) || ! isset( $section['items'] ) || ! is_array( $section['items'] ) ) {
+				continue;
+			}
+
+			foreach ( $section['items'] as $item_index => $item ) {
+				if ( ! is_array( $item ) || ! isset( $item['type'], $item['url'] ) || 'IMAGE' !== $item['type'] ) {
+					continue;
+				}
+
+				$moved = $this->transfer_images( $upload, $access, array( (string) $item['url'] ), $transferred );
+
+				if ( array() !== $moved ) {
+					$description['sections'][ $section_index ]['items'][ $item_index ]['url'] = $moved[0];
+				}
+			}
+		}
+
+		return $description;
 	}
 
 	/**

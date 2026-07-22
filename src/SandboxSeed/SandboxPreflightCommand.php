@@ -77,6 +77,9 @@ final class SandboxPreflightCommand {
 		'implied-warranties'    => '/after-sales-service-conditions/implied-warranties',
 		'warranties'            => '/after-sales-service-conditions/warranties',
 		'responsible-producers' => '/sale/responsible-producers',
+		// Nie jest słownikiem KONTA, tylko katalogiem metod dostawy — ale zasiew potrzebuje z niego
+		// `shippingRatesConstraints`, żeby założyć zwykły cennik, więc sonda go cache'uje.
+		'delivery-methods'      => '/sale/delivery-methods',
 	);
 
 	/**
