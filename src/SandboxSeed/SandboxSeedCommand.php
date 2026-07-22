@@ -133,6 +133,11 @@ final class SandboxSeedCommand {
 	 * default: ACTIVE
 	 * ---
 	 *
+	 * [--refresh-token]
+	 * : Wymuś rotację tokenu slotu PRZED przebiegiem. Potrzebne, gdy zmienił się stan KONTA
+	 *   po stronie Allegro (np. przemianowanie na konto firmowe): stary access token żyje 12 h,
+	 *   więc bez rotacji komenda dalej chodziłaby ze starym kontekstem konta.
+	 *
 	 * [--refresh-images]
 	 * : Wypchnij zdjęcia ponownie także wtedy, gdy wyglądają na obecne.
 	 *
@@ -183,7 +188,7 @@ final class SandboxSeedCommand {
 		}
 
 		$api    = $environment->api_base_url();
-		$access = $this->access_token( $environment->type() );
+		$access = $this->access_token( $environment->type(), (bool) get_flag_value( $assoc_args, 'refresh-token', false ) );
 
 		$shipping_rate = $this->resolve_shipping_rate( $api, $access, (string) get_flag_value( $assoc_args, 'shipping-rate', '' ) );
 		$after_sales   = $this->ensure_after_sales( $api, $access, $dry_run );
@@ -393,9 +398,20 @@ final class SandboxSeedCommand {
 		}
 
 		foreach ( (array) ( $response['data'][ $collection ] ?? array() ) as $entry ) {
-			if ( is_array( $entry ) && isset( $entry['id'] ) ) {
-				return (string) $entry['id'];
+			if ( ! is_array( $entry ) || ! isset( $entry['id'] ) ) {
+				continue;
 			}
+
+			/*
+			 * Zwrotka niesie `seller.id` — jedyny dostępny w naszych scope'ach sposób, żeby
+			 * powiedzieć, NA JAKIM koncie siedzą tokeny (`GET /me` wymaga `profile:read`).
+			 * Przy sporze „które konto przemianowano" to jest rozstrzygający fakt.
+			 */
+			if ( isset( $entry['seller']['id'] ) ) {
+				WP_CLI::log( sprintf( 'Konto tokenu (seller.id): %s', (string) $entry['seller']['id'] ) );
+			}
+
+			return (string) $entry['id'];
 		}
 
 		return null;
@@ -426,6 +442,37 @@ final class SandboxSeedCommand {
 		WP_CLI::log( sprintf( 'Założono w sandboxie: %s → %s', $path, (string) $response['data']['id'] ) );
 
 		return (string) $response['data']['id'];
+	}
+
+	/**
+	 * Przerywa CAŁY przebieg, gdy odmowa dotyczy konta, a nie oferty.
+	 *
+	 * `OfferAccessDeniedException` („nie możesz korzystać z tej metody Publicznego API" na koncie
+	 * zwykłym) nie jest cechą pojedynczej oferty — kolejne 554 próby dostałyby to samo. Bez tej
+	 * bramki raport pokazuje 555 „błędów oferty" i gubi jedyną prawdziwą przyczynę.
+	 *
+	 * Sprawdzenia nie da się zrobić z wyprzedzeniem przez `GET /me`: ten endpoint wymaga scope'u
+	 * `allegro:api:profile:read`, którego rola `write` świadomie nie ma (D-2.G6) — potwierdzone
+	 * runtime odpowiedzią 403 `AccessDenied`. Dlatego rozpoznajemy przyczynę z pierwszej odmowy.
+	 *
+	 * @param array{status:int,body:string,data:array<mixed>|null,error:string} $response Odpowiedź POST-a.
+	 * @return void
+	 */
+	private function abort_on_account_refusal( array $response ): void {
+		if ( 403 !== $response['status'] ) {
+			return;
+		}
+
+		foreach ( (array) ( $response['data']['errors'] ?? array() ) as $error ) {
+			if ( is_array( $error ) && isset( $error['code'] ) && 'OfferAccessDeniedException' === $error['code'] ) {
+				WP_CLI::error(
+					'Allegro odmawia tworzenia ofert na TYM koncie: publiczne API wymaga konta FIRMOWEGO '
+					. '(403 OfferAccessDeniedException). Przerywam przebieg — kolejne oferty dostałyby to samo. '
+					. 'Sprawdź, czy sloty sandbox/read i sandbox/write są autoryzowane na koncie firmowym '
+					. '(tokeny są per konto, więc po zmianie konta trzeba autoryzować je ponownie).'
+				);
+			}
+		}
 	}
 
 	/**
@@ -550,6 +597,8 @@ final class SandboxSeedCommand {
 		$response = $this->send( 'POST', $api . '/sale/product-offers', $access, $payload );
 
 		if ( 201 !== $response['status'] && 200 !== $response['status'] ) {
+			$this->abort_on_account_refusal( $response );
+
 			return array(
 				'action'      => 'failed',
 				'detail'      => sprintf( 'HTTP %d %s', $response['status'], $this->error_detail( $response ) ),
@@ -1008,9 +1057,10 @@ final class SandboxSeedCommand {
 	 * Pobiera ważny access token slotu `write` wskazanego środowiska.
 	 *
 	 * @param string $environment Identyfikator środowiska.
+	 * @param bool   $force       Czy wymusić rotację zamiast użyć ważnego tokenu z magazynu.
 	 * @return string Access token (nigdy nie trafia do wyjścia poza nagłówkiem żądania).
 	 */
-	private function access_token( string $environment ): string {
+	private function access_token( string $environment, bool $force = false ): string {
 		$config = Environment::for_environment( $environment );
 
 		if ( ! $config->has_credentials( Environment::ROLE_WRITE ) ) {
@@ -1019,7 +1069,16 @@ final class SandboxSeedCommand {
 			);
 		}
 
-		$tokens = ( new TokenRefresher() )->get_valid( $environment, Environment::ROLE_WRITE );
+		$refresher = new TokenRefresher();
+
+		/*
+		 * `get_valid()` oddaje token z magazynu, dopóki jest ważny (12 h) — a token niesie
+		 * KONTEKST KONTA z chwili autoryzacji. Gdy konto zmieniło stan po stronie Allegro,
+		 * trzeba wymusić rotację, inaczej komenda uparcie chodzi ze starym kontekstem.
+		 */
+		$tokens = $force
+			? $refresher->refresh( $environment, Environment::ROLE_WRITE )
+			: $refresher->get_valid( $environment, Environment::ROLE_WRITE );
 
 		if ( is_wp_error( $tokens ) ) {
 			WP_CLI::error( sprintf( 'Brak ważnego tokenu %s/write: %s', $environment, $tokens->get_error_message() ) );
