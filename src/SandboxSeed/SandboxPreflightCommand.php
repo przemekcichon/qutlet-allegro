@@ -130,6 +130,18 @@ final class SandboxPreflightCommand {
 
 		$product_budget  = max( 0, (int) get_flag_value( $assoc_args, 'products', '60' ) );
 		$category_budget = max( 0, (int) get_flag_value( $assoc_args, 'categories', '0' ) );
+		$id_map_file     = get_flag_value( $assoc_args, 'write-id-map', '' );
+
+		/*
+		 * Mapa z OKROJONEGO przebiegu jest gorsza niż jej brak: zasiew pomija oferty w kategoriach
+		 * spoza mapy (D-3A.G5 — brak wpisu = brak mapowania), więc niesprawdzone kategorie po cichu
+		 * wypadłyby z asortymentu. Odmawiamy TU, na samych flagach — nie po setkach żądań i zapisanym
+		 * raporcie; ta sama zasada, co przy bezpieczniku zasiewu: odmowa nie ma prawa nastąpić po
+		 * połowie roboty (ustalenie z recenzji).
+		 */
+		if ( is_string( $id_map_file ) && '' !== $id_map_file && $category_budget > 0 ) {
+			WP_CLI::error( '--write-id-map wymaga --categories=0: mapa z częściowego przebiegu po cichu wycięłaby oferty przy zasiewie.' );
+		}
 
 		if ( ! is_dir( $snapshot . '/offers' ) ) {
 			WP_CLI::error( sprintf( 'Nie widzę katalogu ofert snapshotu: %s/offers', $snapshot ) );
@@ -198,18 +210,7 @@ final class SandboxPreflightCommand {
 
 		$this->print_summary( $report );
 
-		$id_map_file = get_flag_value( $assoc_args, 'write-id-map', '' );
-
 		if ( is_string( $id_map_file ) && '' !== $id_map_file ) {
-			/*
-			 * Mapa z OKROJONEGO przebiegu jest gorsza niż jej brak: zasiew pomija oferty w
-			 * kategoriach spoza mapy (D-3A.G5 — brak wpisu = brak mapowania), więc niesprawdzone
-			 * kategorie po cichu wypadłyby z asortymentu. Dokumentowanie tego nie wystarcza.
-			 */
-			if ( $category_budget > 0 ) {
-				WP_CLI::error( '--write-id-map wymaga --categories=0: mapa z częściowego przebiegu po cichu wycięłaby oferty przy zasiewie.' );
-			}
-
 			$this->write_id_map( $id_map_file, $report['categories']['present_ids'], $parameters['schema'], $inventory );
 		}
 

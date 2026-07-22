@@ -292,7 +292,9 @@ final class SandboxSeedCommand {
 			'generated_at'  => gmdate( 'c' ),
 			'dry_run'       => $dry_run,
 			'start_at'      => $start_at,
-			'shipping_rate' => $shipping_rate,
+			// Pusty cennik może znaczyć tylko jedno: dry-run na koncie bez zwykłego cennika. Samo
+			// `""` w raporcie tego nie mówi, więc mówimy to wprost.
+			'shipping_rate' => '' !== $shipping_rate ? $shipping_rate : '(dry-run: nie zakładano cennika)',
 			'publication'   => $status,
 			'id_map'        => $id_map->sizes(),
 			'sandbox_publication_statuses' => $statuses,
