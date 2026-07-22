@@ -105,6 +105,12 @@ final class SandboxPreflightCommand {
 	 * default: 0
 	 * ---
 	 *
+	 * [--write-id-map=<file>]
+	 * : Zapisz tablicę mapowania prod→sandbox (D-3A.G5) złożoną WYŁĄCZNIE z bytów, których
+	 *   obecność w sandboxie potwierdziło to uruchomienie. Konsumuje ją {@see IdMap}.
+	 *   Sensowne tylko przy `--categories=0` — mapa z częściowego przebiegu pominęłaby
+	 *   kategorie, których nie sprawdzono.
+	 *
 	 * ## EXAMPLES
 	 *
 	 *     wp qutlet-allegro sandbox-preflight --snapshot=C:/…/docs/allegro-snapshot-offers --out=C:/…/preflight
@@ -174,10 +180,13 @@ final class SandboxPreflightCommand {
 				'account_refs'        => $inventory['account_refs'],
 			),
 			'categories'   => $this->probe_categories( $out, $api, $access, $categories ),
-			'parameters'   => $this->probe_category_parameters( $out, $api, $access, $categories, $inventory['offer_parameters'] ),
+			'parameters'   => array(),
 			'products'     => $this->probe_products( $out, $api, $access, $products ),
 			'dictionaries' => $this->probe_dictionaries( $out, $api, $access, $inventory['account_refs'] ),
 		);
+
+		$parameters          = $this->probe_category_parameters( $out, $api, $access, $categories, $inventory['offer_parameters'] );
+		$report['parameters'] = $parameters['report'];
 
 		$this->write(
 			$out . '/preflight-report.json',
@@ -186,7 +195,67 @@ final class SandboxPreflightCommand {
 
 		$this->print_summary( $report );
 
+		$id_map_file = get_flag_value( $assoc_args, 'write-id-map', '' );
+
+		if ( is_string( $id_map_file ) && '' !== $id_map_file ) {
+			$this->write_id_map( $id_map_file, $report['categories']['present_ids'], $parameters['schema'], $inventory );
+		}
+
 		WP_CLI::success( sprintf( 'Raport: %s/preflight-report.json', $out ) );
+	}
+
+	/**
+	 * Zapisuje tablicę mapowania prod→sandbox (D-3A.G5) złożoną z bytów POTWIERDZONYCH w tym
+	 * przebiegu. Mapa jest dziś tożsamościowa — i to jest wynik pomiaru, nie założenie: wpis
+	 * powstaje tylko dla identyfikatora, który sandbox realnie zwrócił. Po kwartalnym
+	 * przetasowaniu kategorii ponowny przebieg wypluje mapę mniejszą (albo inną), a diff
+	 * pokaże, co wypadło — zamiast pozwolić zasiewowi wysłać nieistniejące id.
+	 *
+	 * @param string                                                  $path      Ścieżka pliku mapy.
+	 * @param array<int,string>                                       $categories Kategorie potwierdzone w sandboxie.
+	 * @param array{parameters:array<int,string>,values:array<int,string>} $schema   Byty ze schematów kategorii sandboxa.
+	 * @param array<string,mixed>                                     $inventory Inwentarz snapshotu.
+	 * @return void
+	 */
+	private function write_id_map( string $path, array $categories, array $schema, array $inventory ): void {
+		$map = array(
+			'generatedAt'     => gmdate( 'c' ),
+			'source'          => 'wp qutlet-allegro sandbox-preflight --write-id-map',
+			'note'            => 'Wyłącznie identyfikatory potwierdzone żądaniem do sandboxa (D-3A.G5). Nie edytuj ręcznie — regeneruj pomiarem.',
+			'categories'      => $this->identity_for( $categories ),
+			'parameters'      => $this->identity_for( array_values( array_intersect( $inventory['all_parameter_ids'], $schema['parameters'] ) ) ),
+			'parameterValues' => $this->identity_for( array_values( array_intersect( $inventory['all_value_ids'], $schema['values'] ) ) ),
+		);
+
+		$this->write( $path, (string) wp_json_encode( $map, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE ) );
+
+		WP_CLI::log(
+			sprintf(
+				'Mapa D-3A.G5 → %s (kategorie: %d, parametry: %d, wartości: %d).',
+				$path,
+				count( $map['categories'] ),
+				count( $map['parameters'] ),
+				count( $map['parameterValues'] )
+			)
+		);
+	}
+
+	/**
+	 * Buduje sekcję mapy `id → id` z listy potwierdzonych identyfikatorów.
+	 *
+	 * @param array<int,string> $ids Identyfikatory.
+	 * @return array<array-key,string>
+	 */
+	private function identity_for( array $ids ): array {
+		$section = array();
+
+		sort( $ids );
+
+		foreach ( $ids as $id ) {
+			$section[ $id ] = $id;
+		}
+
+		return $section;
 	}
 
 	/**
@@ -199,8 +268,13 @@ final class SandboxPreflightCommand {
 	 * jest TypeError, a `in_array( …, …, true )` przestaje trafiać. Klucze zostawiamy
 	 * wyłącznie tam, gdzie identyfikator jest nienumeryczny (UUID-y słowników konta).
 	 *
+	 * `offer_parameters` to parametry poziomu OFERTY (te jadą w `parameters` oferty i tylko one
+	 * podlegają walidacji kategorii dziś). `all_parameter_ids`/`all_value_ids` obejmują TAKŻE
+	 * parametry produktu — bo skoro katalogu produktów w sandboxie nie ma, zasiew zejdzie z nimi
+	 * na poziom oferty i wtedy one też muszą być zmapowane.
+	 *
 	 * @param string $snapshot Katalog snapshotu.
-	 * @return array{offers:int,product_based:int,categories:array<int,string>,products:array<int,string>,offer_parameters:array<int,array{id:string,value_ids:array<int,string>}>,account_refs:array<string,array<string,int>>}
+	 * @return array{offers:int,product_based:int,categories:array<int,string>,products:array<int,string>,offer_parameters:array<int,array{id:string,value_ids:array<int,string>}>,all_parameter_ids:array<int,string>,all_value_ids:array<int,string>,account_refs:array<string,array<string,int>>}
 	 */
 	private function read_snapshot_inventory( string $snapshot ): array {
 		$files = glob( $snapshot . '/offers/*.json' );
@@ -220,6 +294,8 @@ final class SandboxPreflightCommand {
 			'responsible-producers' => array(),
 		);
 		$product_based    = 0;
+		$all_parameters   = array();
+		$all_values       = array();
 
 		foreach ( $files as $file ) {
 			$offer = json_decode( (string) file_get_contents( $file ), true ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- lokalny plik snapshotu poza uploads.
@@ -245,10 +321,16 @@ final class SandboxPreflightCommand {
 					if ( isset( $item['responsibleProducer']['id'] ) ) {
 						$this->bump( $account_refs['responsible-producers'], (string) $item['responsibleProducer']['id'] );
 					}
+
+					foreach ( (array) ( $item['product']['parameters'] ?? array() ) as $parameter ) {
+						$this->collect_parameter( $parameter, $all_parameters, $all_values );
+					}
 				}
 			}
 
 			foreach ( (array) ( $offer['parameters'] ?? array() ) as $parameter ) {
+				$this->collect_parameter( $parameter, $all_parameters, $all_values );
+
 				if ( ! is_array( $parameter ) || ! isset( $parameter['id'] ) ) {
 					continue;
 				}
@@ -295,13 +377,35 @@ final class SandboxPreflightCommand {
 		}
 
 		return array(
-			'offers'           => count( $files ),
-			'product_based'    => $product_based,
-			'categories'       => $this->string_keys( $categories ),
-			'products'         => $this->string_keys( $products ),
-			'offer_parameters' => $parameters,
-			'account_refs'     => $account_refs,
+			'offers'            => count( $files ),
+			'product_based'     => $product_based,
+			'categories'        => $this->string_keys( $categories ),
+			'products'          => $this->string_keys( $products ),
+			'offer_parameters'  => $parameters,
+			'all_parameter_ids' => $this->string_keys( $all_parameters ),
+			'all_value_ids'     => $this->string_keys( $all_values ),
+			'account_refs'      => $account_refs,
 		);
+	}
+
+	/**
+	 * Dokłada id parametru i jego wartości słownikowych do zbiorów „wszystko, co widzieliśmy".
+	 *
+	 * @param mixed                  $parameter  Wpis `parameters[]` (oferty albo produktu).
+	 * @param array<array-key,bool>  $parameters Zbiór id parametrów (przez referencję).
+	 * @param array<array-key,bool>  $values     Zbiór id wartości (przez referencję).
+	 * @return void
+	 */
+	private function collect_parameter( $parameter, array &$parameters, array &$values ): void {
+		if ( ! is_array( $parameter ) || ! isset( $parameter['id'] ) ) {
+			return;
+		}
+
+		$parameters[ (string) $parameter['id'] ] = true;
+
+		foreach ( (array) ( $parameter['valuesIds'] ?? array() ) as $value_id ) {
+			$values[ (string) $value_id ] = true;
+		}
 	}
 
 	/**
@@ -311,14 +415,15 @@ final class SandboxPreflightCommand {
 	 * @param string            $api        Baza API sandboxa.
 	 * @param string            $access     Access token.
 	 * @param array<int,string> $categories Id kategorii z produkcji.
-	 * @return array{checked:int,present:int,missing:array<int,string>,other:array<string,int>,leaf:int}
+	 * @return array{checked:int,present:int,present_ids:array<int,string>,missing:array<int,string>,other:array<string,int>,leaf:int}
 	 */
 	private function probe_categories( string $out, string $api, string $access, array $categories ): array {
-		$present = 0;
-		$leaf    = 0;
-		$missing = array();
-		$other   = array();
-		$done    = 0;
+		$present     = 0;
+		$present_ids = array();
+		$leaf        = 0;
+		$missing     = array();
+		$other       = array();
+		$done        = 0;
 
 		foreach ( $categories as $category_id ) {
 			$cached = $this->cached_get(
@@ -329,6 +434,7 @@ final class SandboxPreflightCommand {
 
 			if ( 200 === $cached['status'] ) {
 				++$present;
+				$present_ids[] = $category_id;
 
 				if ( isset( $cached['data']['leaf'] ) && true === $cached['data']['leaf'] ) {
 					++$leaf;
@@ -343,11 +449,12 @@ final class SandboxPreflightCommand {
 		}
 
 		return array(
-			'checked' => count( $categories ),
-			'present' => $present,
-			'leaf'    => $leaf,
-			'missing' => $missing,
-			'other'   => $other,
+			'checked'     => count( $categories ),
+			'present'     => $present,
+			'present_ids' => $present_ids,
+			'leaf'        => $leaf,
+			'missing'     => $missing,
+			'other'       => $other,
 		);
 	}
 
@@ -360,12 +467,14 @@ final class SandboxPreflightCommand {
 	 * @param string                                              $access           Access token.
 	 * @param array<int,string>                                   $categories       Id kategorii.
 	 * @param array<int,array{id:string,value_ids:array<int,string>}> $offer_parameters Parametry oferty ze snapshotu.
-	 * @return array<string,mixed>
+	 * @return array{report:array<string,mixed>,schema:array{parameters:array<int,string>,values:array<int,string>}}
 	 */
 	private function probe_category_parameters( string $out, string $api, string $access, array $categories, array $offer_parameters ): array {
 		$per_parameter    = array();
 		$unavailable      = array();
 		$required_unknown = array();
+		$schema_params    = array();
+		$schema_values    = array();
 		$checked          = 0;
 		$done             = 0;
 
@@ -409,8 +518,16 @@ final class SandboxPreflightCommand {
 					continue;
 				}
 
-				$parameter_id = (string) $parameter['id'];
-				$slot         = $wanted[ $parameter_id ] ?? null;
+				$parameter_id                 = (string) $parameter['id'];
+				$schema_params[ $parameter_id ] = true;
+
+				foreach ( (array) ( $parameter['dictionary'] ?? array() ) as $entry ) {
+					if ( is_array( $entry ) && isset( $entry['id'] ) ) {
+						$schema_values[ (string) $entry['id'] ] = true;
+					}
+				}
+
+				$slot = $wanted[ $parameter_id ] ?? null;
 
 				if ( null === $slot ) {
 					// Parametr WYMAGANY przez sandbox, którego oferta w ogóle nie niesie.
@@ -451,10 +568,16 @@ final class SandboxPreflightCommand {
 		}
 
 		return array(
-			'checked_categories' => $checked,
-			'unavailable'        => $unavailable,
-			'per_parameter'      => $per_parameter,
-			'required_unknown'   => $required_unknown,
+			'report' => array(
+				'checked_categories' => $checked,
+				'unavailable'        => $unavailable,
+				'per_parameter'      => $per_parameter,
+				'required_unknown'   => $required_unknown,
+			),
+			'schema' => array(
+				'parameters' => $this->string_keys( $schema_params ),
+				'values'     => $this->string_keys( $schema_values ),
+			),
 		);
 	}
 
