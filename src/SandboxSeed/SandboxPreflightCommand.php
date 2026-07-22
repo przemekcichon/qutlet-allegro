@@ -201,6 +201,15 @@ final class SandboxPreflightCommand {
 		$id_map_file = get_flag_value( $assoc_args, 'write-id-map', '' );
 
 		if ( is_string( $id_map_file ) && '' !== $id_map_file ) {
+			/*
+			 * Mapa z OKROJONEGO przebiegu jest gorsza niż jej brak: zasiew pomija oferty w
+			 * kategoriach spoza mapy (D-3A.G5 — brak wpisu = brak mapowania), więc niesprawdzone
+			 * kategorie po cichu wypadłyby z asortymentu. Dokumentowanie tego nie wystarcza.
+			 */
+			if ( $category_budget > 0 ) {
+				WP_CLI::error( '--write-id-map wymaga --categories=0: mapa z częściowego przebiegu po cichu wycięłaby oferty przy zasiewie.' );
+			}
+
 			$this->write_id_map( $id_map_file, $report['categories']['present_ids'], $parameters['schema'], $inventory );
 		}
 

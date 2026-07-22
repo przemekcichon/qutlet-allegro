@@ -32,27 +32,28 @@ use function WP_CLI\Utils\get_flag_value;
  *
  * ## Kształt oferty (decyzje użytkownika, sesja 2026-07-22, na podstawie pomiaru
  * `sandbox-preflight`)
- * - **Oferta kategoryjna, nie produktowa.** Wszystkie 555 ofert snapshotu jest produktowych,
- *   ale żaden z 495 identyfikatorów katalogu (`productSet[].product.id`) nie istnieje w
- *   sandboxie (404 `ProductNotFound` w 60/60 próbie). `productSet` więc odpada, a parametry
- *   Z PRODUKTU schodzą na poziom oferty — snapshot je ma (Marka, Model, Kod producenta, EAN),
- *   co pokrywa wymagania sandboxa dla 548/555 ofert.
+ * - **Oferta niesie DEFINICJĘ PRODUKTU (`productSet[0].product`), nie samą kategorię**
+ *   (D-3A.2.1). Wszystkie 555 ofert snapshotu jest produktowych, ale katalog sandboxa nie zna
+ *   ich identyfikatorów (404 `ProductNotFound` w próbie 60/60), więc `productSet[].product.id`
+ *   odpada. Oferta kategoryjna też odpada — i to nie z wyboru, tylko przez zamkniętą pętlę w
+ *   API: kategoria WYMAGA parametrów produktu (422 `MissingRequiredParameters`) i jednocześnie
+ *   ZABRANIA ich w sekcji oferty (422 `ParameterCategoryException`). Wysyłamy więc definicję
+ *   produktu ze snapshotu, a Allegro produkt tworzy albo dopasowuje (wraca `PROPOSED`).
+ *   **Skutek uboczny przyjęty świadomie:** zasiew pisze do katalogu produktów sandboxa.
+ * - **Parametry rozdziela schemat kategorii** po `options.describesProduct`: `true` → sekcja
+ *   produktu, `false` → sekcja oferty. Nic nie jest zgadywane po nazwie parametru.
  * - **Mapowanie prod→sandbox przez {@see IdMap}** (D-3A.G5). Pomiar pokazał dziś tożsamość
  *   (126/126 kategorii), ale warstwa zostaje, bo Allegro odświeża listę kwartalnie. Brak wpisu
  *   = brak mapowania: kategoria bez wpisu pomija ofertę, parametr bez wpisu wypada z payloadu.
  *   Żadnego cichego „pewnie to samo".
- * - **Zasoby konta bierzemy z sandboxa, nie z produkcji.** Produkcyjne UUID-y (98 sztuk:
- *   cenniki, polityki zwrotów, gwarancje, producenci odpowiedzialni) nie istnieją w sandboxie
- *   ani razu, więc `delivery.shippingRates` dostaje cennik KONTA SANDBOXOWEGO, a
- *   `responsibleProducer` wypada z payloadu.
- * - **`afterSalesServices` zakładamy sami.** Pierwotny plan mówił „pomiń jako opcjonalne";
- *   żywe API to obaliło (422 `ReturnPolicyNotDefinedException` +
- *   `ImpliedWarrantyNotDefinedException`), więc — decyzją użytkownika i zgodnie z D-2.G6, które
- *   dało roli `write` scope `sale:settings:write` „wyłącznie do zasiewu sandboxa" — komenda
- *   zakłada brakujące warunki na koncie sandboxowym (idempotentnie) i podstawia ich id.
- * - **Parametry sekcji produktu odpadają.** Schemat kategorii znaczy je
- *   `options.describesProduct`, a Allegro odrzuca ofertę, która wysyła je w `parameters`
- *   (422 `ParameterCategoryException`) — w ofercie kategoryjnej nie mają gdzie usiąść.
+ * - **Zasoby konta bierzemy z sandboxa, nie z produkcji, a brakujące ZAKŁADAMY** (D-3A.2.3,
+ *   D-3A.2.5). Produkcyjne UUID-y (98 sztuk) nie istnieją w sandboxie ani razu, a konto startuje
+ *   bez warunków zwrotów/reklamacji, bez zwykłego cennika (7/7 to One Fulfillment) i bez
+ *   producenta odpowiedzialnego. Wszystkie trzy komenda zakłada sama, idempotentnie —
+ *   `sale:settings:write` D-2.G6 nadało roli `write` właśnie „wyłącznie do zasiewu sandboxa".
+ *   Pierwotne „pomiń jako opcjonalne" obaliło API (422 `ReturnPolicyNotDefinedException`).
+ * - **Zdjęcia PRZENOSIMY na host uploadu środowiska** — obcy adres jest odrzucany
+ *   (422 `OfferImagesNotFoundException`). Dotyczy galerii ORAZ obrazów w opisie.
  *
  * ## Idempotencja i zdjęcia (D-3A.G1 + D-3A.G4)
  * Stanem sterującym jest SANDBOX, nie plik lokalny — bo to sandbox jest czyszczony kwartalnie,
@@ -208,7 +209,7 @@ final class SandboxSeedCommand {
 		$upload = $environment->upload_base_url();
 		$access = $this->access_token( $environment->type(), (bool) get_flag_value( $assoc_args, 'refresh-token', false ) );
 
-		$shipping_rate = $this->resolve_shipping_rate( $api, $access, (string) get_flag_value( $assoc_args, 'shipping-rate', '' ) );
+		$shipping_rate = $this->resolve_shipping_rate( $api, $access, (string) get_flag_value( $assoc_args, 'shipping-rate', '' ), $dry_run );
 		$after_sales   = $this->ensure_after_sales( $api, $access, $dry_run );
 		$producer      = $this->ensure_responsible_producer( $api, $access, $dry_run );
 		$statuses      = array();
@@ -338,11 +339,17 @@ final class SandboxSeedCommand {
 	 * @return array{returnPolicy:array{id:string},impliedWarranty:array{id:string}}|null
 	 */
 	private function ensure_after_sales( string $api, string $access, bool $dry_run ): ?array {
+		/*
+		 * Adres jest W CAŁOŚCI syntetyczny — łącznie z kodem pocztowym i miastem. Pierwsza wersja
+		 * przepisywała `postCode`/`city` ze snapshotu, czyli realną lokalizację sprzedawcy: te same
+		 * pola, które D-3A.G3 wskazuje jako redagowane w FAZIE 3. Deklaracja „syntetyczny" musi być
+		 * prawdziwa co do znaku, inaczej jest gorsza niż jej brak.
+		 */
 		$address = array(
 			'name'        => 'Qutlet Sandbox',
 			'street'      => 'Testowa 1',
-			'postCode'    => '32-091',
-			'city'        => 'Wilczkowice',
+			'postCode'    => '00-001',
+			'city'        => 'Warszawa',
 			'countryCode' => 'PL',
 		);
 
@@ -447,11 +454,12 @@ final class SandboxSeedCommand {
 				'name'         => 'Qutlet sandbox seed',
 				'producerData' => array(
 					'tradeName' => 'Qutlet Sandbox',
+					// Syntetyczny adres, jak przy warunkach konta — bez realnej lokalizacji sprzedawcy.
 					'address'   => array(
 						'countryCode' => 'PL',
 						'street'      => 'Testowa 1',
-						'postalCode'  => '32-091',
-						'city'        => 'Wilczkowice',
+						'postalCode'  => '00-001',
+						'city'        => 'Warszawa',
 					),
 					'contact'   => array(
 						'email' => 'sandbox@qutlet.pl',
@@ -808,15 +816,28 @@ final class SandboxSeedCommand {
 			return array(
 				'action'           => 'failed',
 				'sandbox_offer_id' => $existing['id'],
-				'detail'           => 'nie udalo sie przeniesc ani jednego zdjecia przy odswiezaniu',
+				'detail'           => 'nie udało się przenieść ani jednego zdjęcia przy odświeżaniu',
 			);
+		}
+
+		$payload = array( 'images' => $images );
+
+		/*
+		 * Opis odświeżamy RAZEM z galerią. Obrazy wklejone w opis wygasają dokładnie tak samo jak
+		 * galeria, a sonda kompletności patrzy tylko na `primaryImage` — więc odświeżenie samej
+		 * galerii ustawiałoby ofertę z powrotem na „kompletną" z trwale martwymi obrazami w opisie,
+		 * i żaden kolejny przebieg by ich nie naprawił. To ten sam mechanizm, przed którym
+		 * ostrzega D-3A.G4, tylko schowany o poziom głębiej.
+		 */
+		if ( isset( $offer['description'] ) && is_array( $offer['description'] ) ) {
+			$payload['description'] = $this->rewrite_description_images( $offer['description'], $upload, $access, $transferred );
 		}
 
 		$response = $this->send(
 			'PATCH',
 			$api . '/sale/product-offers/' . rawurlencode( $existing['id'] ),
 			$access,
-			array( 'images' => $images )
+			$payload
 		);
 
 		if ( 200 !== $response['status'] ) {
@@ -1146,9 +1167,10 @@ final class SandboxSeedCommand {
 	 * @param string $api       Baza API.
 	 * @param string $access    Access token.
 	 * @param string $requested Wartość flagi `--shipping-rate` (może być pusta).
-	 * @return string UUID cennika.
+	 * @param bool   $dry_run   Czy przebieg jest próbą (wtedy NIE zakładamy cennika).
+	 * @return string UUID cennika (pusty string w dry-run, gdy trzeba by go dopiero założyć).
 	 */
-	private function resolve_shipping_rate( string $api, string $access, string $requested ): string {
+	private function resolve_shipping_rate( string $api, string $access, string $requested, bool $dry_run ): string {
 		$response = $this->send( 'GET', $api . '/sale/shipping-rates', $access, null );
 
 		if ( 200 !== $response['status'] || ! is_array( $response['data'] ) ) {
@@ -1194,6 +1216,12 @@ final class SandboxSeedCommand {
 		 * outletowy towar leży w magazynie Allegro, zakładamy ZWYKŁY cennik — to samo rozstrzygnięcie
 		 * co przy warunkach posprzedażowych (D-3A.2.3): brakujący zasób konta zasiew tworzy sam.
 		 */
+		if ( $dry_run ) {
+			WP_CLI::log( '  (dry-run) konto sandboxowe ma wyłącznie cenniki One Fulfillment — przebieg właściwy założyłby zwykły.' );
+
+			return '';
+		}
+
 		return $this->create_shipping_rate( $api, $access );
 	}
 
