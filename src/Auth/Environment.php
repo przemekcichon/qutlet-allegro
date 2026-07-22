@@ -106,6 +106,20 @@ final class Environment {
 	);
 
 	/**
+	 * Bazy DEDYKOWANEGO hosta uploadu zdjęć per środowisko (bez ścieżki).
+	 *
+	 * Allegro wymaga osobnego hosta do wysyłki obrazów (`POST /sale/images`) — zwykła baza API
+	 * tej operacji nie obsługuje. Zdjęcia trzeba PRZENIEŚĆ na serwery Allegro danego środowiska:
+	 * oferta z obcym adresem obrazka jest odrzucana (422 `OfferImagesNotFoundException`).
+	 *
+	 * @var array<string,string>
+	 */
+	private const UPLOAD_BASE = array(
+		self::PRODUCTION => 'https://upload.allegro.pl',
+		self::SANDBOX    => 'https://upload.allegro.pl.allegrosandbox.pl',
+	);
+
+	/**
 	 * Rozpoznane środowisko (`self::SANDBOX` albo `self::PRODUCTION`).
 	 *
 	 * @var string
@@ -172,6 +186,14 @@ final class Environment {
 	 */
 	public function api_base_url(): string {
 		return self::API_BASE[ $this->type ];
+	}
+
+	/**
+	 * @return string Baza dedykowanego hosta uploadu zdjęć (`POST /sale/images`).
+	 *                Konsument: zasiew sandboxa (FAZA 3A), który przenosi zdjęcia ofert.
+	 */
+	public function upload_base_url(): string {
+		return self::UPLOAD_BASE[ $this->type ];
 	}
 
 	/**
