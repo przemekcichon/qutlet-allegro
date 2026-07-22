@@ -211,12 +211,16 @@ final class SandboxSeedCommand {
 		$shipping_rate = $this->resolve_shipping_rate( $api, $access, (string) get_flag_value( $assoc_args, 'shipping-rate', '' ) );
 		$after_sales   = $this->ensure_after_sales( $api, $access, $dry_run );
 		$producer      = $this->ensure_responsible_producer( $api, $access, $dry_run );
-		$index         = $this->build_offer_index( $api, $access );
+		$statuses      = array();
+		$index         = $this->build_offer_index( $api, $access, $statuses );
+
+		ksort( $statuses );
 
 		WP_CLI::log(
 			sprintf(
-				'Sandbox: %d ofert z external.id w indeksie. Cennik dostawy: %s. Mapa: %s.',
+				'Sandbox: %d ofert z external.id w indeksie. Statusy publikacji: %s. Cennik dostawy: %s. Mapa: %s.',
 				count( $index ),
+				wp_json_encode( $statuses ),
 				$shipping_rate,
 				wp_json_encode( $id_map->sizes() )
 			)
@@ -290,6 +294,7 @@ final class SandboxSeedCommand {
 			'shipping_rate' => $shipping_rate,
 			'publication'   => $status,
 			'id_map'        => $id_map->sizes(),
+			'sandbox_publication_statuses' => $statuses,
 			'totals'        => $totals,
 			'offers'        => $records,
 		);
@@ -1039,11 +1044,13 @@ final class SandboxSeedCommand {
 	 *
 	 * @param string $api    Baza API.
 	 * @param string $access Access token.
+	 * @param array<array-key,int> $statuses Rozkład statusów publikacji (przez referencję, do logu).
 	 * @return array<array-key,array{id:string,primary_image:string|null}>
 	 */
-	private function build_offer_index( string $api, string $access ): array {
-		$index  = array();
-		$offset = 0;
+	private function build_offer_index( string $api, string $access, array &$statuses ): array {
+		$index    = array();
+		$statuses = array();
+		$offset   = 0;
 
 		for ( $page = 0; $page < self::MAX_INDEX_PAGES; $page++ ) {
 			$url = $api . '/sale/offers?' . http_build_query(
@@ -1075,7 +1082,21 @@ final class SandboxSeedCommand {
 			}
 
 			foreach ( $offers as $offer ) {
-				if ( ! is_array( $offer ) || ! isset( $offer['id'] ) || ! isset( $offer['external']['id'] ) ) {
+				if ( ! is_array( $offer ) || ! isset( $offer['id'] ) ) {
+					continue;
+				}
+
+				/*
+				 * Rozkład statusów publikacji liczymy po WSZYSTKICH ofertach konta, nie tylko po
+				 * zasianych: to jedyny tani sposób sprawdzenia, czy zasiew realnie wystawił towar,
+				 * czy tylko utworzył szkice — a realistyczne środowisko testowe (cel FAZY 3A) stoi
+				 * właśnie na ofertach widocznych, nie na draftach.
+				 */
+				$status = isset( $offer['publication']['status'] ) ? (string) $offer['publication']['status'] : 'unknown';
+
+				$statuses[ $status ] = isset( $statuses[ $status ] ) ? $statuses[ $status ] + 1 : 1;
+
+				if ( ! isset( $offer['external']['id'] ) ) {
 					continue;
 				}
 
