@@ -127,6 +127,16 @@ final class SandboxSeedCommand {
 	 * default: 0
 	 * ---
 	 *
+	 * [--start-at=<n>]
+	 * : Pomiń pierwsze N ofert snapshotu (kolejność alfabetyczna plików) BEZ sprawdzania ich w
+	 *   sandboxie. Do dzielenia przebiegu na porcje: most MCP tnie wywołanie po ~2 minutach, a bez
+	 *   tej flagi każda kolejna porcja marnowałaby budżet czasu na ponowną weryfikację ofert już
+	 *   zasianych. UWAGA: pominięte oferty nie są w tym przebiegu weryfikowane — kompletność
+	 *   (D-3A.G4) potwierdza dopiero przebieg bez tej flagi.
+	 * ---
+	 * default: 0
+	 * ---
+	 *
 	 * [--offer=<offerId>]
 	 * : Przetwórz WYŁĄCZNIE tę jedną ofertę produkcyjną (do prób na żywym API).
 	 *
@@ -168,6 +178,7 @@ final class SandboxSeedCommand {
 		$refresh  = (bool) get_flag_value( $assoc_args, 'refresh-images', false );
 		$limit    = max( 0, (int) get_flag_value( $assoc_args, 'limit', '0' ) );
 		$only     = (string) get_flag_value( $assoc_args, 'offer', '' );
+		$start_at = max( 0, (int) get_flag_value( $assoc_args, 'start-at', '0' ) );
 		$status   = strtoupper( (string) get_flag_value( $assoc_args, 'publication', 'ACTIVE' ) );
 
 		/*
@@ -218,6 +229,10 @@ final class SandboxSeedCommand {
 		}
 
 		sort( $files );
+
+		if ( $start_at > 0 ) {
+			$files = array_slice( $files, $start_at );
+		}
 
 		$records = array();
 		$totals  = array(
@@ -271,6 +286,7 @@ final class SandboxSeedCommand {
 			'api_base'      => $api,
 			'generated_at'  => gmdate( 'c' ),
 			'dry_run'       => $dry_run,
+			'start_at'      => $start_at,
 			'shipping_rate' => $shipping_rate,
 			'publication'   => $status,
 			'id_map'        => $id_map->sizes(),
