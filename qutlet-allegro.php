@@ -59,8 +59,9 @@ register_deactivation_hook( __FILE__, __NAMESPACE__ . '\\Auth\\RefreshScheduler:
  *
  * Najpierw weryfikujemy OBECNOŚĆ twardych zależności (D-G5) i przy braku robimy
  * no-op + notice. Gdy są obecne — rejestrujemy slice'y wtyczki. Aktualnie: slice
- * `Auth/` — flow OAuth (P-2.2) oraz odświeżanie/rotacja tokenów (P-2.3). Komend
- * WP-CLI wciąż nie rejestrujemy (D-0.3.1 — dopiero przy właściwej synchronizacji).
+ * `Auth/` — flow OAuth (P-2.2) oraz odświeżanie/rotacja tokenów (P-2.3) — oraz slice
+ * `ApiSamples/` (P-3.1a) — komenda WP-CLI pobierająca surowe zwrotki ofert (tylko
+ * pod `WP_CLI`; D-0.3.1 zakazywał rejestracji jedynie w bootstrapie FAZY 0).
  *
  * @return void
  */
@@ -98,6 +99,15 @@ function bootstrap(): void {
 	 * `Auth\RefreshScheduler`.
 	 */
 	( new Auth\RefreshScheduler() )->register();
+
+	/*
+	 * Slice ApiSamples (P-3.1a): komenda WP-CLI pobierająca surowe zwrotki ofert
+	 * Allegro do plików (materiał wejściowy dla zredagowanych próbek P-3.1b w meta).
+	 * Rejestrowana WYŁĄCZNIE w kontekście WP-CLI — na froncie/adminie nieobecna.
+	 */
+	if ( defined( 'WP_CLI' ) && \WP_CLI ) {
+		\WP_CLI::add_command( 'qutlet-allegro sample-offers', ApiSamples\OfferSamplesCommand::class );
+	}
 }
 
 /**
