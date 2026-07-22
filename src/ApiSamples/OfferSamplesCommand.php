@@ -155,12 +155,11 @@ final class OfferSamplesCommand {
 		$product_offers = array();
 
 		foreach ( $selected as $category_id => $offer_id ) {
-			$full_url  = $api . '/sale/product-offers/' . rawurlencode( $offer_id );
-			$parts_url = $api . '/sale/product-offers/' . rawurlencode( $offer_id ) . '/parts?' . http_build_query(
-				array( 'include' => array( 'stock', 'price' ) ),
-				'',
-				'&'
-			);
+			$full_url = $api . '/sale/product-offers/' . rawurlencode( $offer_id );
+			// Allegro oczekuje POWTÓRZONEGO parametru `include=stock&include=price`
+			// (a nie zindeksowanej tablicy `include[0]=…`, którą wyprodukowałby
+			// http_build_query) — inaczej endpoint zwraca HTTP 400.
+			$parts_url = $api . '/sale/product-offers/' . rawurlencode( $offer_id ) . '/parts?include=stock&include=price';
 
 			$full  = $this->fetch( $full_url, $access );
 			$parts = $this->fetch( $parts_url, $access );
@@ -171,13 +170,13 @@ final class OfferSamplesCommand {
 			if ( 200 === $full['status'] ) {
 				$this->write( $out . '/' . $full_file, $full['body'] );
 			} else {
-				WP_CLI::warning( sprintf( 'Oferta %s: pełne GET → HTTP %d %s', $offer_id, $full['status'], $full['error'] ) );
+				WP_CLI::warning( sprintf( 'Oferta %s: pełne GET → HTTP %d %s', $offer_id, $full['status'], $this->error_detail( $full ) ) );
 			}
 
 			if ( 200 === $parts['status'] ) {
 				$this->write( $out . '/' . $parts_file, $parts['body'] );
 			} else {
-				WP_CLI::warning( sprintf( 'Oferta %s: /parts → HTTP %d %s', $offer_id, $parts['status'], $parts['error'] ) );
+				WP_CLI::warning( sprintf( 'Oferta %s: /parts → HTTP %d %s', $offer_id, $parts['status'], $this->error_detail( $parts ) ) );
 			}
 
 			$product_offers[ $offer_id ] = array(
@@ -296,6 +295,21 @@ final class OfferSamplesCommand {
 			'data'   => is_array( $decoded ) ? $decoded : null,
 			'error'  => '',
 		);
+	}
+
+	/**
+	 * Zwięzły opis błędu żądania do logu (błąd transportu WP albo urwane body 4xx/5xx).
+	 * Nie trafia do plików-próbek — tylko do stdout/stderr komendy.
+	 *
+	 * @param array{status:int,body:string,data:array<mixed>|null,error:string} $resp Wynik {@see self::fetch()}.
+	 * @return string
+	 */
+	private function error_detail( array $resp ): string {
+		if ( '' !== $resp['error'] ) {
+			return $resp['error'];
+		}
+
+		return trim( substr( $resp['body'], 0, 300 ) );
 	}
 
 	/**
