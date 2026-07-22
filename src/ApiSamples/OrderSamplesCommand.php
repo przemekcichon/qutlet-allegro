@@ -45,8 +45,9 @@ use function WP_CLI\Utils\get_flag_value;
  * - Komenda robi WYŁĄCZNIE żądania GET — bezpiecznik D-2.G7 spełniony trywialnie.
  * - Access token NIGDY nie trafia do wyjścia (plików ani stdout) — służy tylko jako
  *   nagłówek `Authorization` żądania.
- * - Na stdout drukujemy wyłącznie identyfikatory i statusy HTTP, nigdy treści zwrotek
- *   (te zawierają PII i lądują tylko w plikach pod `--out`).
+ * - Treść UDANEJ (HTTP 200) zwrotki nie trafia na stdout — tylko do pliku pod `--out`.
+ *   Na stdout idą identyfikatory i statusy HTTP, a przy statusie ≠ 200 dodatkowo urwany
+ *   początek body błędu ({@see self::error_detail()}) — ograniczenie opisane tamże.
  *
  * Rejestracja: pod guardem `WP_CLI` w bootstrapie wtyczki (nie na froncie).
  */
@@ -108,14 +109,22 @@ final class OrderSamplesCommand {
 	public function __invoke( array $args, array $assoc_args ): void {
 		unset( $args );
 
-		$out = (string) get_flag_value( $assoc_args, 'out', '' );
+		/*
+		 * `--out` PODANE BEZ WARTOŚCI WP-CLI przekazuje jako `true` (flaga), a
+		 * `(string) true` to `'1'` — powstałby katalog `1` względem cwd, czyli zrzut
+		 * realnego PII gdzieś w drzewie WordPressa. Dlatego wymagamy jawnego stringa,
+		 * zamiast rzutować cokolwiek, co przyjdzie.
+		 */
+		$out_flag = get_flag_value( $assoc_args, 'out', '' );
 
-		if ( '' === $out ) {
-			WP_CLI::error( 'Podaj katalog docelowy przez --out=<dir>.' );
+		if ( ! is_string( $out_flag ) || '' === $out_flag ) {
+			WP_CLI::error( 'Podaj katalog docelowy jako ścieżkę: --out=<dir> (poza repozytorium).' );
 		}
 
+		$out         = $out_flag;
 		$max_orders  = max( 1, (int) get_flag_value( $assoc_args, 'max-orders', (string) self::DEFAULT_MAX_ORDERS ) );
-		$explicit_id = (string) get_flag_value( $assoc_args, 'checkout-form-id', '' );
+		$id_flag     = get_flag_value( $assoc_args, 'checkout-form-id', '' );
+		$explicit_id = is_string( $id_flag ) ? $id_flag : '';
 
 		if ( ! wp_mkdir_p( $out ) ) {
 			WP_CLI::error( sprintf( 'Nie mogę utworzyć/otworzyć katalogu docelowego: %s', $out ) );
@@ -223,7 +232,31 @@ final class OrderSamplesCommand {
 
 		$this->write( $out . '/manifest.json', (string) wp_json_encode( $manifest, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE ) );
 
-		WP_CLI::success( sprintf( 'Zapisano surowe zwrotki zamówień do: %s (NIE commituj — realne PII).', $out ) );
+		/*
+		 * Sukces ogłaszamy tylko wtedy, gdy powstał materiał dla P-3.3b. Gdy KAŻDE
+		 * `GET /order/checkout-forms/{id}` padło, w katalogu zostaje sam strumień
+		 * zdarzeń i manifest — stan bezużyteczny, który bez tego warunku byłby
+		 * nieodróżnialny od sukcesu (exit 0 + „Zapisano…”).
+		 */
+		$saved = 0;
+
+		foreach ( $orders as $order ) {
+			if ( null !== $order['file'] ) {
+				++$saved;
+			}
+		}
+
+		if ( 0 === $saved ) {
+			WP_CLI::error(
+				sprintf(
+					'Żadne z %d zamówień nie zostało pobrane (same błędy HTTP) — w %s jest tylko strumień zdarzeń i manifest.',
+					count( $orders ),
+					$out
+				)
+			);
+		}
+
+		WP_CLI::success( sprintf( 'Zapisano %d zamówień do: %s (NIE commituj — realne PII).', $saved, $out ) );
 	}
 
 	/**
@@ -402,8 +435,14 @@ final class OrderSamplesCommand {
 
 	/**
 	 * Zwięzły opis błędu żądania do logu (błąd transportu WP albo urwane body 4xx/5xx).
-	 * Nie trafia do plików-próbek — tylko do stdout/stderr komendy. Body błędu Allegro
-	 * to komunikat walidacyjny, nie treść zamówienia, więc nie niesie PII.
+	 * Nie trafia do plików-próbek — tylko do stdout/stderr komendy.
+	 *
+	 * UWAGA: to jedyne miejsce, w którym fragment body odpowiedzi może pojawić się na
+	 * stdout. Zmierzone na `GET /order/checkout-forms/{id}` z nieistniejącym id (P-3.3a):
+	 * Allegro odpowiada HTTP 422 i kopertą `{"errors":[{"code":"VALIDATION_ERROR",…}]}`
+	 * — komunikat walidacyjny, bez danych kupującego. Pomiar pokrywa błąd walidacji, a
+	 * nie każdy możliwy status; gdyby jakiś błąd echował dane wejściowe, ucięcie do
+	 * 300 znaków jest jedynym ogranicznikiem.
 	 *
 	 * @param array{status:int,body:string,data:array<mixed>|null,error:string} $resp Wynik {@see self::fetch()}.
 	 * @return string
