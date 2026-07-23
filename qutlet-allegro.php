@@ -101,6 +101,17 @@ function bootstrap(): void {
 	( new Auth\RefreshScheduler() )->register();
 
 	/*
+	 * Slice OfferSync (P-6.2b): NATYCHMIASTOWY push stanu do Allegro przy
+	 * sprzedaży/cofnięciu zamówienia w sklepie (D-6.G3). Nasłuch akcji domenowej
+	 * core `Qutlet\Core\OfferSync\StockEvents::ACTION` (mostek P-6.2a) — hooków
+	 * Woo nie dotykamy (granice repo). Rejestracja poza guardem WP_CLI: zdarzenie
+	 * zamówieniowe przychodzi w zwykłym żądaniu WWW (checkout), nie w konsoli.
+	 * Kolejność ładowania bez znaczenia (akcja odpala się długo po plugins_loaded);
+	 * core sprzed P-6.2a → listener sam się nie wpina (guard class_exists).
+	 */
+	( new OfferSync\StockPushListener() )->register();
+
+	/*
 	 * Slice ApiSamples (P-3.1a/P-3.2a/P-3.3a): komendy WP-CLI pobierające surowe zwrotki
 	 * Allegro do plików (materiał wejściowy dla zredagowanych próbek w meta:
 	 * P-3.1b oferty, P-3.2b kategorie, P-3.3b zamówienia). Rejestrowane WYŁĄCZNIE
@@ -128,6 +139,7 @@ function bootstrap(): void {
 		\WP_CLI::add_command( 'qutlet-allegro sandbox-preflight', SandboxSeed\SandboxPreflightCommand::class );
 		\WP_CLI::add_command( 'qutlet-allegro seed-sandbox', SandboxSeed\SandboxSeedCommand::class );
 		\WP_CLI::add_command( 'qutlet-allegro import-offers', OfferSync\ImportOffersCommand::class );
+		\WP_CLI::add_command( 'qutlet-allegro sync-stock', OfferSync\SyncStockCommand::class );
 	}
 }
 
