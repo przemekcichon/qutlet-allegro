@@ -98,7 +98,25 @@ final class ImageSideloader {
 	}
 
 	/**
+	 * Mapowanie MIME → rozszerzenie pliku dla obrazów Allegro.
+	 *
+	 * @var array<string,string>
+	 */
+	private const MIME_EXTENSIONS = array(
+		'image/jpeg' => 'jpg',
+		'image/png'  => 'png',
+		'image/gif'  => 'gif',
+		'image/webp' => 'webp',
+	);
+
+	/**
 	 * Pobiera obraz do biblioteki mediów jako załącznik produktu.
+	 *
+	 * Świadomie NIE `media_sideload_image()`: URL-e CDN Allegro (`a.allegroimg…`)
+	 * nie mają rozszerzenia pliku, a tamta funkcja waliduje URL właśnie po
+	 * rozszerzeniu i odrzuca takie adresy z góry (zaobserwowane na realnym
+	 * przebiegu — HTTP 200, `image/jpeg`, mimo to odmowa). Dlatego: `download_url()`
+	 * → rozszerzenie z REALNEGO MIME pobranego pliku → `media_handle_sideload()`.
 	 *
 	 * @param string $url        Źródłowy URL.
 	 * @param int    $product_id Rodzic załącznika.
@@ -107,9 +125,36 @@ final class ImageSideloader {
 	private function sideload( string $url, int $product_id ): ?int {
 		$this->ensure_admin_includes();
 
-		$attachment_id = media_sideload_image( $url, $product_id, null, 'id' );
+		$tmp = download_url( $url );
+
+		if ( is_wp_error( $tmp ) ) {
+			return null;
+		}
+
+		$mime      = wp_get_image_mime( $tmp );
+		$extension = false !== $mime ? ( self::MIME_EXTENSIONS[ $mime ] ?? null ) : null;
+
+		if ( null === $extension ) {
+			wp_delete_file( $tmp );
+
+			return null; // Nie-obraz albo format spoza słownika — nie wciągamy do mediów.
+		}
+
+		// Nazwa z końcówki URL-a (hex id obrazu Allegro) + realne rozszerzenie.
+		$path = (string) wp_parse_url( $url, PHP_URL_PATH );
+		$name = sanitize_file_name( basename( $path ) . '.' . $extension );
+
+		$attachment_id = media_handle_sideload(
+			array(
+				'name'     => $name,
+				'tmp_name' => $tmp,
+			),
+			$product_id
+		);
 
 		if ( is_wp_error( $attachment_id ) ) {
+			wp_delete_file( $tmp );
+
 			return null;
 		}
 
@@ -117,13 +162,13 @@ final class ImageSideloader {
 	}
 
 	/**
-	 * Dociąga pliki admina wymagane przez `media_sideload_image()` w kontekście
-	 * WP-CLI (media/file/image nie są ładowane poza ekranami admina).
+	 * Dociąga pliki admina wymagane przez `download_url()`/`media_handle_sideload()`
+	 * w kontekście WP-CLI (media/file/image nie są ładowane poza ekranami admina).
 	 *
 	 * @return void
 	 */
 	private function ensure_admin_includes(): void {
-		if ( function_exists( 'media_sideload_image' ) ) {
+		if ( function_exists( 'media_handle_sideload' ) ) {
 			return;
 		}
 
