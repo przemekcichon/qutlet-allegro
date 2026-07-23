@@ -67,6 +67,25 @@ final class ProductWriter {
 	private const CONDITION_META = 'klasa_stanu';
 
 	/**
+	 * `meta_key` (name) pola `cena_allegro` — do odczytu bieżącej wartości przy
+	 * lekkim syncu (P-6.2b); zapis idzie przez klucz ACF jak przy imporcie.
+	 */
+	private const ALLEGRO_PRICE_META = 'cena_allegro';
+
+	/**
+	 * Statusy posta przy wyszukiwaniu po kluczu powiązania. JAWNA lista zamiast
+	 * `'any'`, bo `'any'` NIE obejmuje kosza (`trash` ma `exclude_from_search`),
+	 * a produkt w koszu to świadome wycofanie (D-6.2.1) — MUSI zostać znaleziony,
+	 * żeby import/sync mógł go POMINĄĆ, zamiast utworzyć duplikat od nowa.
+	 *
+	 * Publiczna — tej samej listy używa `SyncStockCommand` przy wyszukiwaniu
+	 * produktów z markerem zaległego pusha (jedno źródło semantyki „z koszem").
+	 *
+	 * @var array<int,string>
+	 */
+	public const LINK_LOOKUP_STATUSES = array( 'publish', 'future', 'draft', 'pending', 'private', 'trash' );
+
+	/**
 	 * Stawka VAT mapowana na STANDARDOWĄ klasę podatkową Woo (pusty slug).
 	 */
 	private const STANDARD_VAT_RATE = '23';
@@ -107,7 +126,18 @@ final class ProductWriter {
 		$warnings = array();
 
 		$existing_id = $this->find_product_id( $offer_id, $warnings );
-		$product     = null !== $existing_id ? wc_get_product( $existing_id ) : null;
+
+		// Produkt w koszu = świadome wycofanie przez kuratora (D-6.2.1): zero
+		// zapisów, żadnego tworzenia od nowa — komenda pomija ofertę i loguje.
+		if ( null !== $existing_id && 'trash' === get_post_status( $existing_id ) ) {
+			return array(
+				'action'     => 'skipped-trashed',
+				'product_id' => $existing_id,
+				'warnings'   => $warnings,
+			);
+		}
+
+		$product = null !== $existing_id ? wc_get_product( $existing_id ) : null;
 
 		if ( ! $product instanceof WC_Product ) {
 			$product = new WC_Product_Simple();
@@ -279,17 +309,99 @@ final class ProductWriter {
 	}
 
 	/**
+	 * Lekki sync stanu i ceny (P-6.2b): zapisuje `_stock` oraz `cena_allegro` z
+	 * przeliczeniem `_price` wg efektywnej stawki (formuła D-4.1.2, kontrakt §11)
+	 * — bez dotykania reszty produktu (warstwy surowej, kategorii, zdjęć…).
+	 *
+	 * Zapisy są WARUNKOWE (tylko przy realnej różnicy), żeby rekoncyliacja
+	 * pełnego katalogu nie robiła setek pustych `save()`. `_price` porównujemy
+	 * z aktualną stawką przy KAŻDYM wywołaniu z ceną (kontrakt §11: przeliczane
+	 * przy każdym sync) — zmiana samej stawki rabatu też propaguje się do ceny.
+	 *
+	 * Produkt w koszu = wycofany (D-6.2.1): zero zapisów, ostrzeżenie dla logu —
+	 * obrona w głębi, niezależnie od filtrów wywołującego.
+	 *
+	 * @param int        $product_id   Id produktu Woo.
+	 * @param int|null   $stock        Stan `stock.available` z Allegro (null = nie ruszaj stanu).
+	 * @param float|null $cena_allegro Cena `sellingMode.price.amount` (null = nie ruszaj cen).
+	 * @return array{stock_updated:bool,price_updated:bool,warnings:array<int,string>}
+	 */
+	public function apply_stock_and_price( int $product_id, ?int $stock, ?float $cena_allegro ): array {
+		if ( 'trash' === get_post_status( $product_id ) ) {
+			return array(
+				'stock_updated' => false,
+				'price_updated' => false,
+				'warnings'      => array( sprintf( 'Produkt %d w koszu — wycofany (D-6.2.1), sync pominięty.', $product_id ) ),
+			);
+		}
+
+		$product = wc_get_product( $product_id );
+
+		if ( ! $product instanceof WC_Product ) {
+			return array(
+				'stock_updated' => false,
+				'price_updated' => false,
+				'warnings'      => array( sprintf( 'Produkt %d nie istnieje/nie jest produktem Woo — sync pominięty.', $product_id ) ),
+			);
+		}
+
+		$warnings = array();
+
+		$stock_updated = false;
+		$price_updated = false;
+
+		if ( null !== $stock && $product->get_stock_quantity() !== $stock ) {
+			$product->set_manage_stock( true );
+			$product->set_stock_quantity( $stock );
+			$stock_updated = true;
+		}
+
+		if ( null !== $cena_allegro ) {
+			$rate = DiscountRate::effective_percent( $product_id );
+			$shop = OfferMapper::shop_price( $cena_allegro, $rate );
+
+			// number_format, nie cast — jak przy imporcie (LC_NUMERIC, recenzja P-6.1b).
+			$shop_str = number_format( $shop, 2, '.', '' );
+
+			if ( $product->get_regular_price() !== $shop_str ) {
+				$product->set_regular_price( $shop_str );
+				$product->set_price( $shop_str );
+				$price_updated = true;
+			}
+
+			$current_allegro = number_format( (float) get_post_meta( $product_id, self::ALLEGRO_PRICE_META, true ), 2, '.', '' );
+
+			if ( number_format( $cena_allegro, 2, '.', '' ) !== $current_allegro ) {
+				update_field( self::ACF_KEY_ALLEGRO_PRICE, $cena_allegro, $product_id );
+				$price_updated = true;
+			}
+		}
+
+		if ( $stock_updated || $price_updated ) {
+			$product->save();
+		}
+
+		return array(
+			'stock_updated' => $stock_updated,
+			'price_updated' => $price_updated,
+			'warnings'      => $warnings,
+		);
+	}
+
+	/**
 	 * Szuka produktu po kluczu powiązania `_qutlet_allegro_offer_id` (idempotencja).
+	 * Publiczna, bo używa jej też sync stanów (P-6.2b) — jedno miejsce z semantyką
+	 * wyszukania (statusy z koszem włącznie — D-6.2.1, duplikaty z ostrzeżeniem).
 	 *
 	 * @param string             $offer_id  Id oferty Allegro.
 	 * @param array<int,string>  $warnings  Akumulator ostrzeżeń (duplikaty klucza).
 	 * @return int|null Id produktu albo null (brak → utworzenie).
 	 */
-	private function find_product_id( string $offer_id, array &$warnings ): ?int {
+	public function find_product_id( string $offer_id, array &$warnings ): ?int {
 		$found = get_posts(
 			array(
 				'post_type'      => 'product',
-				'post_status'    => 'any',
+				'post_status'    => self::LINK_LOOKUP_STATUSES,
 				'posts_per_page' => 2,
 				'fields'         => 'ids',
 				'meta_key'       => AllegroLinkMeta::META_OFFER_ID, // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_key -- klucz idempotencji importu (kontrakt §10.1); indeks pod to wyszukanie to jawnie osobna decyzja FAZY 6.
