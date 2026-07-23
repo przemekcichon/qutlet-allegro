@@ -10,7 +10,7 @@ declare( strict_types=1 );
 namespace Qutlet\Allegro\ApiSamples;
 
 use Qutlet\Allegro\Auth\Environment;
-use Qutlet\Allegro\Auth\TokenRefresher;
+use Qutlet\Allegro\Cli\AllegroCliSupport;
 use WP_CLI;
 use function WP_CLI\Utils\get_flag_value;
 
@@ -30,8 +30,8 @@ use function WP_CLI\Utils\get_flag_value;
  *   wywołania).
  *
  * Bezpieczeństwo:
- * - Token bierzemy ze slotu `production/read` przez {@see TokenRefresher::get_valid()}
- *   (on-demand rotacja P-2.3). Slot `read` nie ma prawa zapisu.
+ * - Token slotu `production/read` bierzemy przez wspólne {@see AllegroCliSupport::access_token()}
+ *   (on-demand rotacja P-2.3 pod spodem). Slot `read` nie ma prawa zapisu.
  * - Komenda robi WYŁĄCZNIE żądania GET — nie tworzy, nie edytuje, nie usuwa ofert;
  *   bezpiecznik D-2.G7 (zapis treści oferty tylko na sandboxie) jest spełniony
  *   trywialnie, bo nie ma tu żadnej operacji zapisu do Allegro.
@@ -42,10 +42,7 @@ use function WP_CLI\Utils\get_flag_value;
  */
 final class OfferSamplesCommand {
 
-	/**
-	 * Nagłówek `Accept` wymagany przez Allegro REST API (wersjonowany media type).
-	 */
-	private const ACCEPT = 'application/vnd.allegro.public.v1+json';
+	use AllegroCliSupport;
 
 	/**
 	 * Domyślny limit ofert na stronę listy (maksimum akceptowane przez Allegro).
@@ -107,7 +104,7 @@ final class OfferSamplesCommand {
 			WP_CLI::error( sprintf( 'Nie mogę utworzyć/otworzyć katalogu docelowego: %s', $out ) );
 		}
 
-		$access = $this->access_token();
+		$access = $this->access_token( Environment::PRODUCTION, Environment::ROLE_READ );
 		$api    = Environment::for_environment( Environment::PRODUCTION )->api_base_url();
 
 		// 1. Lista ofert (jedna strona).
@@ -117,7 +114,7 @@ final class OfferSamplesCommand {
 				'offset' => 0,
 			)
 		);
-		$list_resp = $this->fetch( $list_url, $access );
+		$list_resp = $this->get( $list_url, $access );
 
 		if ( 200 !== $list_resp['status'] || ! is_array( $list_resp['data'] ) ) {
 			WP_CLI::error(
@@ -161,8 +158,8 @@ final class OfferSamplesCommand {
 			// http_build_query) — inaczej endpoint zwraca HTTP 400.
 			$parts_url = $api . '/sale/product-offers/' . rawurlencode( $offer_id ) . '/parts?include=stock&include=price';
 
-			$full  = $this->fetch( $full_url, $access );
-			$parts = $this->fetch( $parts_url, $access );
+			$full  = $this->get( $full_url, $access );
+			$parts = $this->get( $parts_url, $access );
 
 			$full_file  = 'product-offer_' . $offer_id . '.full.raw.json';
 			$parts_file = 'product-offer_' . $offer_id . '.parts.raw.json';
@@ -210,22 +207,6 @@ final class OfferSamplesCommand {
 	}
 
 	/**
-	 * Pobiera ważny access token slotu `production/read` (rotacja on-demand P-2.3).
-	 * Kończy komendę błędem, gdy slot niepołączony / refresh wygasł / błąd sieci.
-	 *
-	 * @return string Access token (nigdy nie trafia do wyjścia poza nagłówkiem żądania).
-	 */
-	private function access_token(): string {
-		$tokens = ( new TokenRefresher() )->get_valid( Environment::PRODUCTION, Environment::ROLE_READ );
-
-		if ( is_wp_error( $tokens ) ) {
-			WP_CLI::error( sprintf( 'Brak ważnego tokenu production/read: %s', $tokens->get_error_message() ) );
-		}
-
-		return $tokens->access_token();
-	}
-
-	/**
 	 * Wybiera po JEDNEJ ofercie na każdą napotkaną kategorię (kolejność jak w liście),
 	 * do `$max` kategorii. Realizacja D-3.G3 (rozpiętość kategorii > liczba ofert).
 	 *
@@ -255,73 +236,5 @@ final class OfferSamplesCommand {
 		}
 
 		return $by_category;
-	}
-
-	/**
-	 * Wykonuje żądanie GET z tokenem bearer i wersjonowanym `Accept`.
-	 *
-	 * @param string $url    Pełny URL.
-	 * @param string $access Access token (bearer).
-	 * @return array{status:int,body:string,data:array<mixed>|null,error:string} Znormalizowany wynik.
-	 */
-	private function fetch( string $url, string $access ): array {
-		$response = wp_remote_get(
-			$url,
-			array(
-				'timeout' => self::REQUEST_TIMEOUT,
-				'headers' => array(
-					'Authorization' => 'Bearer ' . $access,
-					'Accept'        => self::ACCEPT,
-				),
-			)
-		);
-
-		if ( is_wp_error( $response ) ) {
-			return array(
-				'status' => 0,
-				'body'   => '',
-				'data'   => null,
-				'error'  => $response->get_error_message(),
-			);
-		}
-
-		$status = (int) wp_remote_retrieve_response_code( $response );
-		$body   = (string) wp_remote_retrieve_body( $response );
-		$decoded = json_decode( $body, true );
-
-		return array(
-			'status' => $status,
-			'body'   => $body,
-			'data'   => is_array( $decoded ) ? $decoded : null,
-			'error'  => '',
-		);
-	}
-
-	/**
-	 * Zwięzły opis błędu żądania do logu (błąd transportu WP albo urwane body 4xx/5xx).
-	 * Nie trafia do plików-próbek — tylko do stdout/stderr komendy.
-	 *
-	 * @param array{status:int,body:string,data:array<mixed>|null,error:string} $resp Wynik {@see self::fetch()}.
-	 * @return string
-	 */
-	private function error_detail( array $resp ): string {
-		if ( '' !== $resp['error'] ) {
-			return $resp['error'];
-		}
-
-		return trim( substr( $resp['body'], 0, 300 ) );
-	}
-
-	/**
-	 * Zapisuje treść do pliku, kończąc komendę błędem przy niepowodzeniu.
-	 *
-	 * @param string $path     Ścieżka pliku.
-	 * @param string $contents Treść (surowy JSON verbatim albo manifest).
-	 * @return void
-	 */
-	private function write( string $path, string $contents ): void {
-		if ( false === file_put_contents( $path, $contents ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- surowy zrzut poza WP uploads; WP_Filesystem to nadmiar dla jednorazowego narzędzia CLI.
-			WP_CLI::error( sprintf( 'Nie mogę zapisać pliku: %s', $path ) );
-		}
 	}
 }

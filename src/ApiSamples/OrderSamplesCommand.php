@@ -10,7 +10,7 @@ declare( strict_types=1 );
 namespace Qutlet\Allegro\ApiSamples;
 
 use Qutlet\Allegro\Auth\Environment;
-use Qutlet\Allegro\Auth\TokenRefresher;
+use Qutlet\Allegro\Cli\AllegroCliSupport;
 use WP_CLI;
 use function WP_CLI\Utils\get_flag_value;
 
@@ -39,24 +39,26 @@ use function WP_CLI\Utils\get_flag_value;
  * różnymi id. Który z pobranych kształtów trafi ostatecznie do repo, rozstrzyga P-3.3b.
  *
  * Bezpieczeństwo:
- * - Token bierzemy ze slotu `production/read` przez {@see TokenRefresher::get_valid()}
- *   (on-demand rotacja P-2.3). Scope `allegro:api:orders:read` należy do roli `read`
+ * - Token slotu `production/read` bierzemy przez wspólne {@see AllegroCliSupport::access_token()}
+ *   (on-demand rotacja P-2.3 pod spodem). Scope `allegro:api:orders:read` należy do roli `read`
  *   (D-2.G6), więc slot `read` wystarcza i nie ma prawa zapisu.
  * - Komenda robi WYŁĄCZNIE żądania GET — bezpiecznik D-2.G7 spełniony trywialnie.
  * - Access token NIGDY nie trafia do wyjścia (plików ani stdout) — służy tylko jako
  *   nagłówek `Authorization` żądania.
  * - Treść UDANEJ (HTTP 200) zwrotki nie trafia na stdout — tylko do pliku pod `--out`.
  *   Na stdout idą identyfikatory i statusy HTTP, a przy statusie ≠ 200 dodatkowo urwany
- *   początek body błędu ({@see self::error_detail()}) — ograniczenie opisane tamże.
+ *   początek body błędu (wspólne {@see AllegroCliSupport::error_detail()}). To JEDYNE
+ *   miejsce, w którym fragment body odpowiedzi może pojawić się na stdout. Zmierzone na
+ *   `GET /order/checkout-forms/{id}` z nieistniejącym id (P-3.3a): Allegro odpowiada
+ *   HTTP 422 kopertą `{"errors":[{"code":"VALIDATION_ERROR",…}]}` — komunikat walidacyjny,
+ *   bez danych kupującego. Pomiar pokrywa błąd walidacji, nie każdy możliwy status; gdyby
+ *   jakiś błąd echował dane wejściowe, ucięcie do 300 znaków jest jedynym ogranicznikiem.
  *
  * Rejestracja: pod guardem `WP_CLI` w bootstrapie wtyczki (nie na froncie).
  */
 final class OrderSamplesCommand {
 
-	/**
-	 * Nagłówek `Accept` wymagany przez Allegro REST API (wersjonowany media type).
-	 */
-	private const ACCEPT = 'application/vnd.allegro.public.v1+json';
+	use AllegroCliSupport;
 
 	/**
 	 * Domyślny górny limit zamówień do pobrania (D-3.G3 — publikujemy podzbiór).
@@ -130,12 +132,12 @@ final class OrderSamplesCommand {
 			WP_CLI::error( sprintf( 'Nie mogę utworzyć/otworzyć katalogu docelowego: %s', $out ) );
 		}
 
-		$access = $this->access_token();
+		$access = $this->access_token( Environment::PRODUCTION, Environment::ROLE_READ );
 		$api    = Environment::for_environment( Environment::PRODUCTION )->api_base_url();
 
 		// 1. Strumień zdarzeń zamówień (próbka sama w sobie ORAZ źródło checkoutFormId).
 		$events_url  = $api . '/order/events?' . http_build_query( array( 'limit' => self::EVENT_LIMIT ) );
-		$events_resp = $this->fetch( $events_url, $access );
+		$events_resp = $this->get( $events_url, $access );
 
 		if ( 200 === $events_resp['status'] ) {
 			$this->write( $out . '/GET_order-events.raw.json', $events_resp['body'] );
@@ -164,7 +166,7 @@ final class OrderSamplesCommand {
 					'offset' => 0,
 				)
 			);
-			$list_resp = $this->fetch( $list_url, $access );
+			$list_resp = $this->get( $list_url, $access );
 
 			if ( 200 === $list_resp['status'] ) {
 				$this->write( $out . '/GET_order-checkout-forms_list.raw.json', $list_resp['body'] );
@@ -198,7 +200,7 @@ final class OrderSamplesCommand {
 		foreach ( $selected as $form_id => $origin ) {
 			$form_id  = (string) $form_id;
 			$form_url = $api . '/order/checkout-forms/' . rawurlencode( $form_id );
-			$form     = $this->fetch( $form_url, $access );
+			$form     = $this->get( $form_url, $access );
 			$file     = 'order-checkout-form_' . $this->safe_name( $form_id ) . '.raw.json';
 
 			if ( 200 === $form['status'] ) {
@@ -257,22 +259,6 @@ final class OrderSamplesCommand {
 		}
 
 		WP_CLI::success( sprintf( 'Zapisano %d zamówień do: %s (NIE commituj — realne PII).', $saved, $out ) );
-	}
-
-	/**
-	 * Pobiera ważny access token slotu `production/read` (rotacja on-demand P-2.3).
-	 * Kończy komendę błędem, gdy slot niepołączony / refresh wygasł / błąd sieci.
-	 *
-	 * @return string Access token (nigdy nie trafia do wyjścia poza nagłówkiem żądania).
-	 */
-	private function access_token(): string {
-		$tokens = ( new TokenRefresher() )->get_valid( Environment::PRODUCTION, Environment::ROLE_READ );
-
-		if ( is_wp_error( $tokens ) ) {
-			WP_CLI::error( sprintf( 'Brak ważnego tokenu production/read: %s', $tokens->get_error_message() ) );
-		}
-
-		return $tokens->access_token();
 	}
 
 	/**
@@ -391,91 +377,5 @@ final class OrderSamplesCommand {
 		}
 
 		return $selected;
-	}
-
-	/**
-	 * Wykonuje żądanie GET z tokenem bearer i wersjonowanym `Accept`.
-	 *
-	 * @param string $url    Pełny URL.
-	 * @param string $access Access token (bearer).
-	 * @return array{status:int,body:string,data:array<mixed>|null,error:string} Znormalizowany wynik.
-	 */
-	private function fetch( string $url, string $access ): array {
-		$response = wp_remote_get(
-			$url,
-			array(
-				'timeout' => self::REQUEST_TIMEOUT,
-				'headers' => array(
-					'Authorization' => 'Bearer ' . $access,
-					'Accept'        => self::ACCEPT,
-				),
-			)
-		);
-
-		if ( is_wp_error( $response ) ) {
-			return array(
-				'status' => 0,
-				'body'   => '',
-				'data'   => null,
-				'error'  => $response->get_error_message(),
-			);
-		}
-
-		$status  = (int) wp_remote_retrieve_response_code( $response );
-		$body    = (string) wp_remote_retrieve_body( $response );
-		$decoded = json_decode( $body, true );
-
-		return array(
-			'status' => $status,
-			'body'   => $body,
-			'data'   => is_array( $decoded ) ? $decoded : null,
-			'error'  => '',
-		);
-	}
-
-	/**
-	 * Zwięzły opis błędu żądania do logu (błąd transportu WP albo urwane body 4xx/5xx).
-	 * Nie trafia do plików-próbek — tylko do stdout/stderr komendy.
-	 *
-	 * UWAGA: to jedyne miejsce, w którym fragment body odpowiedzi może pojawić się na
-	 * stdout. Zmierzone na `GET /order/checkout-forms/{id}` z nieistniejącym id (P-3.3a):
-	 * Allegro odpowiada HTTP 422 i kopertą `{"errors":[{"code":"VALIDATION_ERROR",…}]}`
-	 * — komunikat walidacyjny, bez danych kupującego. Pomiar pokrywa błąd walidacji, a
-	 * nie każdy możliwy status; gdyby jakiś błąd echował dane wejściowe, ucięcie do
-	 * 300 znaków jest jedynym ogranicznikiem.
-	 *
-	 * @param array{status:int,body:string,data:array<mixed>|null,error:string} $resp Wynik {@see self::fetch()}.
-	 * @return string
-	 */
-	private function error_detail( array $resp ): string {
-		if ( '' !== $resp['error'] ) {
-			return $resp['error'];
-		}
-
-		return trim( substr( $resp['body'], 0, 300 ) );
-	}
-
-	/**
-	 * Sprowadza identyfikator do bezpiecznego fragmentu nazwy pliku. `checkoutFormId`
-	 * bywa też podawany ręcznie flagą, więc nie wklejamy go do ścieżki bez filtra.
-	 *
-	 * @param string $id Identyfikator zamówienia.
-	 * @return string Fragment nazwy pliku złożony z `A-Za-z0-9._-`.
-	 */
-	private function safe_name( string $id ): string {
-		return (string) preg_replace( '/[^A-Za-z0-9._-]/', '_', $id );
-	}
-
-	/**
-	 * Zapisuje treść do pliku, kończąc komendę błędem przy niepowodzeniu.
-	 *
-	 * @param string $path     Ścieżka pliku.
-	 * @param string $contents Treść (surowy JSON verbatim albo manifest).
-	 * @return void
-	 */
-	private function write( string $path, string $contents ): void {
-		if ( false === file_put_contents( $path, $contents ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- surowy zrzut poza WP uploads; WP_Filesystem to nadmiar dla jednorazowego narzędzia CLI.
-			WP_CLI::error( sprintf( 'Nie mogę zapisać pliku: %s', $path ) );
-		}
 	}
 }

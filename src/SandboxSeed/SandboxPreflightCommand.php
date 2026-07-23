@@ -10,7 +10,7 @@ declare( strict_types=1 );
 namespace Qutlet\Allegro\SandboxSeed;
 
 use Qutlet\Allegro\Auth\Environment;
-use Qutlet\Allegro\Auth\TokenRefresher;
+use Qutlet\Allegro\Cli\AllegroCliSupport;
 use WP_CLI;
 use function WP_CLI\Utils\get_flag_value;
 
@@ -50,10 +50,7 @@ use function WP_CLI\Utils\get_flag_value;
  */
 final class SandboxPreflightCommand {
 
-	/**
-	 * Nagłówek `Accept` wymagany przez Allegro REST API (wersjonowany media type).
-	 */
-	private const ACCEPT = 'application/vnd.allegro.public.v1+json';
+	use AllegroCliSupport;
 
 	/**
 	 * Timeout pojedynczego żądania HTTP (sekundy).
@@ -167,7 +164,7 @@ final class SandboxPreflightCommand {
 
 		$env    = Environment::for_environment( Environment::SANDBOX );
 		$api    = $env->api_base_url();
-		$access = $this->access_token();
+		$access = $this->access_token( Environment::SANDBOX, Environment::ROLE_WRITE );
 
 		$categories = $inventory['categories'];
 		$products   = $inventory['products'];
@@ -717,20 +714,11 @@ final class SandboxPreflightCommand {
 			}
 		}
 
-		$response = wp_remote_get(
-			$url,
-			array(
-				'timeout' => self::REQUEST_TIMEOUT,
-				'headers' => array(
-					'Authorization' => 'Bearer ' . $access,
-					'Accept'        => self::ACCEPT,
-				),
-			)
-		);
+		$response = $this->get( $url, $access );
 
-		if ( is_wp_error( $response ) ) {
+		if ( 0 === $response['status'] && '' !== $response['error'] ) {
 			// Błędu transportu NIE cache'ujemy — to stan chwilowy, nie odpowiedź sandboxa.
-			WP_CLI::warning( sprintf( '%s → %s', $url, $response->get_error_message() ) );
+			WP_CLI::warning( sprintf( '%s → %s', $url, $response['error'] ) );
 
 			return array(
 				'status' => 0,
@@ -738,19 +726,17 @@ final class SandboxPreflightCommand {
 			);
 		}
 
-		$status  = (int) wp_remote_retrieve_response_code( $response );
-		$decoded = json_decode( (string) wp_remote_retrieve_body( $response ), true );
-		$entry   = array(
+		$entry = array(
 			'url'    => $url,
-			'status' => $status,
-			'data'   => is_array( $decoded ) ? $decoded : null,
+			'status' => $response['status'],
+			'data'   => $response['data'],
 		);
 
 		$this->write( $path, (string) wp_json_encode( $entry, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE ) );
 
 		return array(
-			'status' => $status,
-			'data'   => $entry['data'],
+			'status' => $response['status'],
+			'data'   => $response['data'],
 		);
 	}
 
@@ -811,45 +797,6 @@ final class SandboxPreflightCommand {
 	}
 
 	/**
-	 * Pobiera ważny access token slotu `sandbox/write` (jedyny ze scope'em `sale:settings:read`).
-	 *
-	 * @return string Access token (nigdy nie trafia do wyjścia poza nagłówkiem żądania).
-	 */
-	private function access_token(): string {
-		$environment = Environment::for_environment( Environment::SANDBOX );
-
-		if ( ! $environment->has_credentials( Environment::ROLE_WRITE ) ) {
-			WP_CLI::error( 'Brak stałych QUTLET_ALLEGRO_SANDBOX_WRITE_CLIENT_ID/SECRET w wp-config.php.' );
-		}
-
-		$tokens = ( new TokenRefresher() )->get_valid( Environment::SANDBOX, Environment::ROLE_WRITE );
-
-		if ( is_wp_error( $tokens ) ) {
-			WP_CLI::error( sprintf( 'Brak ważnego tokenu sandbox/write: %s', $tokens->get_error_message() ) );
-		}
-
-		return $tokens->access_token();
-	}
-
-	/**
-	 * Odczytuje flagę katalogu, odrzucając przełącznik bez wartości (WP-CLI podaje wtedy `true`,
-	 * a `(string) true` to `'1'` — powstałby katalog `1` względem cwd).
-	 *
-	 * @param array<string,string|bool> $assoc_args Flagi.
-	 * @param string                    $name       Nazwa flagi.
-	 * @return string Ścieżka bez końcowego separatora.
-	 */
-	private function require_dir_flag( array $assoc_args, string $name ): string {
-		$value = get_flag_value( $assoc_args, $name, '' );
-
-		if ( ! is_string( $value ) || '' === $value ) {
-			WP_CLI::error( sprintf( 'Podaj katalog jako ścieżkę: --%s=<dir>.', $name ) );
-		}
-
-		return rtrim( $value, "/\\" );
-	}
-
-	/**
 	 * Zwiększa licznik w tablicy `klucz => liczność`. Klucz numeryczny PHP i tak zamieni na
 	 * `int` — stąd `array-key` w typie, zamiast udawać, że zostaje stringiem.
 	 *
@@ -890,29 +837,6 @@ final class SandboxPreflightCommand {
 	private function tick( int $done, int $total, string $label ): void {
 		if ( 0 === $done % self::PROGRESS_EVERY || $done === $total ) {
 			WP_CLI::log( sprintf( '  %s: %d/%d', $label, $done, $total ) );
-		}
-	}
-
-	/**
-	 * Sprowadza identyfikator do bezpiecznego fragmentu nazwy pliku.
-	 *
-	 * @param string $id Identyfikator.
-	 * @return string
-	 */
-	private function safe_name( string $id ): string {
-		return (string) preg_replace( '/[^A-Za-z0-9._-]/', '_', $id );
-	}
-
-	/**
-	 * Zapisuje treść do pliku, kończąc komendę błędem przy niepowodzeniu.
-	 *
-	 * @param string $path     Ścieżka pliku.
-	 * @param string $contents Treść.
-	 * @return void
-	 */
-	private function write( string $path, string $contents ): void {
-		if ( false === file_put_contents( $path, $contents ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- cache narzędzia CLI poza WP uploads.
-			WP_CLI::error( sprintf( 'Nie mogę zapisać pliku: %s', $path ) );
 		}
 	}
 }

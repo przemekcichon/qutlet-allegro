@@ -10,7 +10,7 @@ declare( strict_types=1 );
 namespace Qutlet\Allegro\SandboxSeed;
 
 use Qutlet\Allegro\Auth\Environment;
-use Qutlet\Allegro\Auth\TokenRefresher;
+use Qutlet\Allegro\Cli\AllegroCliSupport;
 use InvalidArgumentException;
 use RuntimeException;
 use WP_CLI;
@@ -72,13 +72,12 @@ use function WP_CLI\Utils\get_flag_value;
  */
 final class SandboxSeedCommand {
 
-	/**
-	 * Nagłówek `Accept`/`Content-Type` wymagany przez Allegro REST API.
-	 */
-	private const MEDIA_TYPE = 'application/vnd.allegro.public.v1+json';
+	use AllegroCliSupport;
 
 	/**
-	 * Timeout pojedynczego żądania HTTP (sekundy).
+	 * Timeout pojedynczego żądania HTTP (sekundy). Zasiew POST/PATCH-uje pełne oferty, więc
+	 * dostaje więcej czasu niż lżejsze GET-owe komendy (30 s); {@see AllegroCliSupport::send()}
+	 * czyta tę stałą przez `self::`.
 	 */
 	private const REQUEST_TIMEOUT = 45;
 
@@ -207,7 +206,7 @@ final class SandboxSeedCommand {
 
 		$api    = $environment->api_base_url();
 		$upload = $environment->upload_base_url();
-		$access = $this->access_token( $environment->type(), (bool) get_flag_value( $assoc_args, 'refresh-token', false ) );
+		$access = $this->access_token( $environment->type(), Environment::ROLE_WRITE, (bool) get_flag_value( $assoc_args, 'refresh-token', false ) );
 
 		$shipping_rate = $this->resolve_shipping_rate( $api, $access, (string) get_flag_value( $assoc_args, 'shipping-rate', '' ), $dry_run );
 		$after_sales   = $this->ensure_after_sales( $api, $access, $dry_run );
@@ -484,7 +483,7 @@ final class SandboxSeedCommand {
 		$response = $this->send( 'GET', $api . $path, $access, null );
 
 		if ( 200 !== $response['status'] || ! is_array( $response['data'] ) ) {
-			WP_CLI::error( sprintf( 'GET %s zwróciło HTTP %d %s.', $path, $response['status'], $this->error_detail( $response ) ) );
+			WP_CLI::error( sprintf( 'GET %s zwróciło HTTP %d %s.', $path, $response['status'], $this->error_detail( $response, 500 ) ) );
 		}
 
 		foreach ( (array) ( $response['data'][ $collection ] ?? array() ) as $entry ) {
@@ -521,7 +520,7 @@ final class SandboxSeedCommand {
 
 		if ( 201 !== $response['status'] && 200 !== $response['status'] ) {
 			WP_CLI::error(
-				sprintf( 'POST %s zwróciło HTTP %d %s.', $path, $response['status'], $this->error_detail( $response ) )
+				sprintf( 'POST %s zwróciło HTTP %d %s.', $path, $response['status'], $this->error_detail( $response, 500 ) )
 			);
 		}
 
@@ -757,7 +756,7 @@ final class SandboxSeedCommand {
 
 			return array(
 				'action'      => 'failed',
-				'detail'      => sprintf( 'HTTP %d %s', $response['status'], $this->error_detail( $response ) ),
+				'detail'      => sprintf( 'HTTP %d %s', $response['status'], $this->error_detail( $response, 500 ) ),
 				'http_status' => $response['status'],
 			);
 		}
@@ -846,7 +845,7 @@ final class SandboxSeedCommand {
 			return array(
 				'action'           => 'failed',
 				'sandbox_offer_id' => $existing['id'],
-				'detail'           => sprintf( 'PATCH images HTTP %d %s', $response['status'], $this->error_detail( $response ) ),
+				'detail'           => sprintf( 'PATCH images HTTP %d %s', $response['status'], $this->error_detail( $response, 500 ) ),
 				'http_status'      => $response['status'],
 			);
 		}
@@ -1002,7 +1001,7 @@ final class SandboxSeedCommand {
 	 * @return array<array-key,array{dictionary:array<int,string>,type:string,describesProduct:bool}>
 	 */
 	private function category_schema( string $api, string $access, string $cache, string $category ): array {
-		$path = $cache . '/category-parameters/' . preg_replace( '/[^A-Za-z0-9._-]/', '_', $category ) . '.json';
+		$path = $cache . '/category-parameters/' . $this->safe_name( $category ) . '.json';
 		$data = null;
 
 		if ( file_exists( $path ) ) {
@@ -1091,7 +1090,7 @@ final class SandboxSeedCommand {
 						'GET /sale/offers (offset=%d) zwróciło HTTP %d %s — bez indeksu zasiew dublowałby oferty.',
 						$offset,
 						$response['status'],
-						$this->error_detail( $response )
+						$this->error_detail( $response, 500 )
 					)
 				);
 			}
@@ -1177,7 +1176,7 @@ final class SandboxSeedCommand {
 
 		if ( 200 !== $response['status'] || ! is_array( $response['data'] ) ) {
 			WP_CLI::error(
-				sprintf( 'GET /sale/shipping-rates zwróciło HTTP %d %s.', $response['status'], $this->error_detail( $response ) )
+				sprintf( 'GET /sale/shipping-rates zwróciło HTTP %d %s.', $response['status'], $this->error_detail( $response, 500 ) )
 			);
 		}
 
@@ -1254,7 +1253,7 @@ final class SandboxSeedCommand {
 		$response = $this->send( 'GET', $api . '/sale/delivery-methods', $access, null );
 
 		if ( 200 !== $response['status'] || ! is_array( $response['data'] ) ) {
-			WP_CLI::error( sprintf( 'GET /sale/delivery-methods zwróciło HTTP %d %s.', $response['status'], $this->error_detail( $response ) ), false );
+			WP_CLI::error( sprintf( 'GET /sale/delivery-methods zwróciło HTTP %d %s.', $response['status'], $this->error_detail( $response, 500 ) ), false );
 			WP_CLI::halt( 1 );
 		}
 
@@ -1313,7 +1312,7 @@ final class SandboxSeedCommand {
 				return (string) $created['data']['id'];
 			}
 
-			$last = sprintf( '%s → HTTP %d %s', (string) ( $method['name'] ?? $method['id'] ), $created['status'], $this->error_detail( $created ) );
+			$last = sprintf( '%s → HTTP %d %s', (string) ( $method['name'] ?? $method['id'] ), $created['status'], $this->error_detail( $created, 500 ) );
 
 			WP_CLI::warning( sprintf( 'Cennik odrzucony: %s', $last ) );
 		}
@@ -1421,7 +1420,7 @@ final class SandboxSeedCommand {
 			$response = $this->send( 'POST', $upload . '/sale/images', $access, array( 'url' => $url ) );
 
 			if ( ( 201 !== $response['status'] && 200 !== $response['status'] ) || ! isset( $response['data']['location'] ) ) {
-				WP_CLI::warning( sprintf( 'Nie przeniosłem zdjęcia %s → HTTP %d %s', $url, $response['status'], $this->error_detail( $response ) ) );
+				WP_CLI::warning( sprintf( 'Nie przeniosłem zdjęcia %s → HTTP %d %s', $url, $response['status'], $this->error_detail( $response, 500 ) ) );
 
 				continue;
 			}
@@ -1527,100 +1526,6 @@ final class SandboxSeedCommand {
 	}
 
 	/**
-	 * Pobiera ważny access token slotu `write` wskazanego środowiska.
-	 *
-	 * @param string $environment Identyfikator środowiska.
-	 * @param bool   $force       Czy wymusić rotację zamiast użyć ważnego tokenu z magazynu.
-	 * @return string Access token (nigdy nie trafia do wyjścia poza nagłówkiem żądania).
-	 */
-	private function access_token( string $environment, bool $force = false ): string {
-		$config = Environment::for_environment( $environment );
-
-		if ( ! $config->has_credentials( Environment::ROLE_WRITE ) ) {
-			WP_CLI::error(
-				sprintf( 'Brak stałych client_id/client_secret pary %s/write w wp-config.php.', $environment )
-			);
-		}
-
-		$refresher = new TokenRefresher();
-
-		/*
-		 * `get_valid()` oddaje token z magazynu, dopóki jest ważny (12 h) — a token niesie
-		 * KONTEKST KONTA z chwili autoryzacji. Gdy konto zmieniło stan po stronie Allegro,
-		 * trzeba wymusić rotację, inaczej komenda uparcie chodzi ze starym kontekstem.
-		 */
-		$tokens = $force
-			? $refresher->refresh( $environment, Environment::ROLE_WRITE )
-			: $refresher->get_valid( $environment, Environment::ROLE_WRITE );
-
-		if ( is_wp_error( $tokens ) ) {
-			WP_CLI::error( sprintf( 'Brak ważnego tokenu %s/write: %s', $environment, $tokens->get_error_message() ) );
-		}
-
-		return $tokens->access_token();
-	}
-
-	/**
-	 * Wykonuje żądanie do Allegro (GET bez ciała, POST/PATCH z ciałem JSON).
-	 *
-	 * @param string                   $method Metoda HTTP.
-	 * @param string                   $url    Pełny URL.
-	 * @param string                   $access Access token.
-	 * @param array<string,mixed>|null $body   Ciało żądania albo null.
-	 * @return array{status:int,body:string,data:array<mixed>|null,error:string}
-	 */
-	private function send( string $method, string $url, string $access, ?array $body ): array {
-		$args = array(
-			'method'  => $method,
-			'timeout' => self::REQUEST_TIMEOUT,
-			'headers' => array(
-				'Authorization' => 'Bearer ' . $access,
-				'Accept'        => self::MEDIA_TYPE,
-			),
-		);
-
-		if ( null !== $body ) {
-			$args['headers']['Content-Type'] = self::MEDIA_TYPE;
-			$args['body']                    = (string) wp_json_encode( $body, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE );
-		}
-
-		$response = wp_remote_request( $url, $args );
-
-		if ( is_wp_error( $response ) ) {
-			return array(
-				'status' => 0,
-				'body'   => '',
-				'data'   => null,
-				'error'  => $response->get_error_message(),
-			);
-		}
-
-		$raw     = (string) wp_remote_retrieve_body( $response );
-		$decoded = json_decode( $raw, true );
-
-		return array(
-			'status' => (int) wp_remote_retrieve_response_code( $response ),
-			'body'   => $raw,
-			'data'   => is_array( $decoded ) ? $decoded : null,
-			'error'  => '',
-		);
-	}
-
-	/**
-	 * Zwięzły opis błędu żądania (błąd transportu albo urwane body odpowiedzi).
-	 *
-	 * @param array{status:int,body:string,data:array<mixed>|null,error:string} $response Wynik {@see self::send()}.
-	 * @return string
-	 */
-	private function error_detail( array $response ): string {
-		if ( '' !== $response['error'] ) {
-			return $response['error'];
-		}
-
-		return trim( substr( $response['body'], 0, 500 ) );
-	}
-
-	/**
 	 * Ścieżka pliku mapy: flaga albo plik obok kodu slice'a.
 	 *
 	 * @param array<string,string|bool> $assoc_args Flagi.
@@ -1634,35 +1539,5 @@ final class SandboxSeedCommand {
 		}
 
 		return __DIR__ . '/id-map.json';
-	}
-
-	/**
-	 * Odczytuje flagę katalogu, odrzucając przełącznik bez wartości.
-	 *
-	 * @param array<string,string|bool> $assoc_args Flagi.
-	 * @param string                    $name       Nazwa flagi.
-	 * @return string
-	 */
-	private function require_dir_flag( array $assoc_args, string $name ): string {
-		$value = get_flag_value( $assoc_args, $name, '' );
-
-		if ( ! is_string( $value ) || '' === $value ) {
-			WP_CLI::error( sprintf( 'Podaj katalog jako ścieżkę: --%s=<dir>.', $name ) );
-		}
-
-		return rtrim( $value, "/\\" );
-	}
-
-	/**
-	 * Zapisuje plik, kończąc komendę błędem przy niepowodzeniu.
-	 *
-	 * @param string $path     Ścieżka.
-	 * @param string $contents Treść.
-	 * @return void
-	 */
-	private function write( string $path, string $contents ): void {
-		if ( false === file_put_contents( $path, $contents ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- narzędzie CLI poza WP uploads.
-			WP_CLI::error( sprintf( 'Nie mogę zapisać pliku: %s', $path ) );
-		}
 	}
 }

@@ -10,7 +10,7 @@ declare( strict_types=1 );
 namespace Qutlet\Allegro\SandboxSeed;
 
 use Qutlet\Allegro\Auth\Environment;
-use Qutlet\Allegro\Auth\TokenRefresher;
+use Qutlet\Allegro\Cli\AllegroCliSupport;
 use WP_CLI;
 use function WP_CLI\Utils\get_flag_value;
 
@@ -40,8 +40,8 @@ use function WP_CLI\Utils\get_flag_value;
  * Zdjęcia (D-3A.1.3): zapisujemy `images[].url` w zwrotce, NIE ściągamy binariów.
  *
  * Bezpieczeństwo:
- * - Token ze slotu `production/read` przez {@see TokenRefresher::get_valid()} (rotacja
- *   on-demand P-2.3). Slot `read` nie ma prawa zapisu.
+ * - Token slotu `production/read` przez wspólne {@see AllegroCliSupport::access_token()}
+ *   (rotacja on-demand P-2.3 pod spodem). Slot `read` nie ma prawa zapisu.
  * - Komenda robi WYŁĄCZNIE żądania GET — bezpiecznik D-2.G7 spełniony trywialnie, a
  *   jednokierunkowość D-3A.G2 (produkcja → snapshot → sandbox, nigdy odwrotnie) wynika
  *   z tego, że nie ma tu żadnej operacji zapisu do Allegro.
@@ -54,10 +54,7 @@ use function WP_CLI\Utils\get_flag_value;
  */
 final class OfferSnapshotCommand {
 
-	/**
-	 * Nagłówek `Accept` wymagany przez Allegro REST API (wersjonowany media type).
-	 */
-	private const ACCEPT = 'application/vnd.allegro.public.v1+json';
+	use AllegroCliSupport;
 
 	/**
 	 * Status publikacji kwalifikujący ofertę do pełnego pobrania (D-3A.1.1).
@@ -150,7 +147,7 @@ final class OfferSnapshotCommand {
 			WP_CLI::error( sprintf( 'Nie mogę utworzyć/otworzyć katalogu docelowego: %s', $out ) );
 		}
 
-		$access = $this->access_token();
+		$access = $this->access_token( Environment::PRODUCTION, Environment::ROLE_READ );
 		$api    = Environment::for_environment( Environment::PRODUCTION )->api_base_url();
 
 		// 1. Kompletna lista ofert (wszystkie strony) — zapisywana verbatim, strona po stronie.
@@ -229,7 +226,7 @@ final class OfferSnapshotCommand {
 				continue;
 			}
 
-			$full = $this->fetch( $api . '/sale/product-offers/' . rawurlencode( $offer_id ), $access );
+			$full = $this->get( $api . '/sale/product-offers/' . rawurlencode( $offer_id ), $access );
 
 			if ( 200 !== $full['status'] ) {
 				++$failed;
@@ -345,7 +342,7 @@ final class OfferSnapshotCommand {
 					'offset' => $offset,
 				)
 			);
-			$resp = $this->fetch( $url, $access );
+			$resp = $this->get( $url, $access );
 
 			if ( 200 !== $resp['status'] || ! is_array( $resp['data'] ) ) {
 				WP_CLI::error(
@@ -527,77 +524,6 @@ final class OfferSnapshotCommand {
 	}
 
 	/**
-	 * Pobiera ważny access token slotu `production/read` (rotacja on-demand P-2.3).
-	 * Kończy komendę błędem, gdy slot niepołączony / refresh wygasł / błąd sieci.
-	 *
-	 * @return string Access token (nigdy nie trafia do wyjścia poza nagłówkiem żądania).
-	 */
-	private function access_token(): string {
-		$tokens = ( new TokenRefresher() )->get_valid( Environment::PRODUCTION, Environment::ROLE_READ );
-
-		if ( is_wp_error( $tokens ) ) {
-			WP_CLI::error( sprintf( 'Brak ważnego tokenu production/read: %s', $tokens->get_error_message() ) );
-		}
-
-		return $tokens->access_token();
-	}
-
-	/**
-	 * Wykonuje żądanie GET z tokenem bearer i wersjonowanym `Accept`.
-	 *
-	 * @param string $url    Pełny URL.
-	 * @param string $access Access token (bearer).
-	 * @return array{status:int,body:string,data:array<mixed>|null,error:string} Znormalizowany wynik.
-	 */
-	private function fetch( string $url, string $access ): array {
-		$response = wp_remote_get(
-			$url,
-			array(
-				'timeout' => self::REQUEST_TIMEOUT,
-				'headers' => array(
-					'Authorization' => 'Bearer ' . $access,
-					'Accept'        => self::ACCEPT,
-				),
-			)
-		);
-
-		if ( is_wp_error( $response ) ) {
-			return array(
-				'status' => 0,
-				'body'   => '',
-				'data'   => null,
-				'error'  => $response->get_error_message(),
-			);
-		}
-
-		$status  = (int) wp_remote_retrieve_response_code( $response );
-		$body    = (string) wp_remote_retrieve_body( $response );
-		$decoded = json_decode( $body, true );
-
-		return array(
-			'status' => $status,
-			'body'   => $body,
-			'data'   => is_array( $decoded ) ? $decoded : null,
-			'error'  => '',
-		);
-	}
-
-	/**
-	 * Zwięzły opis błędu żądania do logu (błąd transportu WP albo urwane body 4xx/5xx).
-	 * Nie trafia do plików snapshotu — tylko na stdout/stderr komendy.
-	 *
-	 * @param array{status:int,body:string,data:array<mixed>|null,error:string} $resp Wynik {@see self::fetch()}.
-	 * @return string
-	 */
-	private function error_detail( array $resp ): string {
-		if ( '' !== $resp['error'] ) {
-			return $resp['error'];
-		}
-
-		return trim( substr( $resp['body'], 0, 300 ) );
-	}
-
-	/**
 	 * Formatuje rozkład statusów do jednej linii logu (`ACTIVE=612, ENDED=140`).
 	 *
 	 * @param array<string,int> $counts Rozkład `status => liczba`.
@@ -611,29 +537,5 @@ final class OfferSnapshotCommand {
 		}
 
 		return implode( ', ', $parts );
-	}
-
-	/**
-	 * Sprowadza identyfikator oferty do bezpiecznego fragmentu nazwy pliku. `offerId` jest
-	 * u Allegro numeryczny, ale wpada do ścieżki, więc nie wklejamy go bez filtra.
-	 *
-	 * @param string $id Identyfikator oferty.
-	 * @return string Fragment nazwy pliku złożony z `A-Za-z0-9._-`.
-	 */
-	private function safe_name( string $id ): string {
-		return (string) preg_replace( '/[^A-Za-z0-9._-]/', '_', $id );
-	}
-
-	/**
-	 * Zapisuje treść do pliku, kończąc komendę błędem przy niepowodzeniu.
-	 *
-	 * @param string $path     Ścieżka pliku.
-	 * @param string $contents Treść (surowy JSON verbatim albo manifest).
-	 * @return void
-	 */
-	private function write( string $path, string $contents ): void {
-		if ( false === file_put_contents( $path, $contents ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- surowy zrzut poza WP uploads; WP_Filesystem to nadmiar dla narzędzia CLI.
-			WP_CLI::error( sprintf( 'Nie mogę zapisać pliku: %s', $path ) );
-		}
 	}
 }

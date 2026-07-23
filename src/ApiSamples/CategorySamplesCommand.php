@@ -10,7 +10,7 @@ declare( strict_types=1 );
 namespace Qutlet\Allegro\ApiSamples;
 
 use Qutlet\Allegro\Auth\Environment;
-use Qutlet\Allegro\Auth\TokenRefresher;
+use Qutlet\Allegro\Cli\AllegroCliSupport;
 use WP_CLI;
 use function WP_CLI\Utils\get_flag_value;
 
@@ -35,8 +35,8 @@ use function WP_CLI\Utils\get_flag_value;
  * dzieci, pełny detal). Oba wybory można nadpisać flagami `--parent-id`/`--category-id`.
  *
  * Bezpieczeństwo:
- * - Token bierzemy ze slotu `production/read` przez {@see TokenRefresher::get_valid()}
- *   (on-demand rotacja P-2.3). Slot `read` nie ma prawa zapisu.
+ * - Token slotu `production/read` bierzemy przez wspólne {@see AllegroCliSupport::access_token()}
+ *   (on-demand rotacja P-2.3 pod spodem). Slot `read` nie ma prawa zapisu.
  * - Komenda robi WYŁĄCZNIE żądania GET — nie tworzy, nie edytuje, nie usuwa niczego;
  *   bezpiecznik D-2.G7 (zapis treści oferty tylko na sandboxie) spełniony trywialnie.
  * - Access token NIGDY nie trafia do wyjścia (plików ani stdout) — służy tylko jako
@@ -46,10 +46,7 @@ use function WP_CLI\Utils\get_flag_value;
  */
 final class CategorySamplesCommand {
 
-	/**
-	 * Nagłówek `Accept` wymagany przez Allegro REST API (wersjonowany media type).
-	 */
-	private const ACCEPT = 'application/vnd.allegro.public.v1+json';
+	use AllegroCliSupport;
 
 	/**
 	 * Timeout pojedynczego żądania HTTP (sekundy).
@@ -98,12 +95,12 @@ final class CategorySamplesCommand {
 			WP_CLI::error( sprintf( 'Nie mogę utworzyć/otworzyć katalogu docelowego: %s', $out ) );
 		}
 
-		$access = $this->access_token();
+		$access = $this->access_token( Environment::PRODUCTION, Environment::ROLE_READ );
 		$api    = Environment::for_environment( Environment::PRODUCTION )->api_base_url();
 
 		// 1. Lista kategorii korzenia (top-level, parent: null).
 		$root_url  = $api . '/sale/categories';
-		$root_resp = $this->fetch( $root_url, $access );
+		$root_resp = $this->get( $root_url, $access );
 
 		if ( 200 !== $root_resp['status'] || ! is_array( $root_resp['data'] ) ) {
 			WP_CLI::error(
@@ -142,7 +139,7 @@ final class CategorySamplesCommand {
 		//    Allegro używa kropkowanego parametru `parent.id` — budujemy query ręcznie,
 		//    żeby http_build_query nie przerobiło klucza (spójnie z OfferSamplesCommand).
 		$children_url  = $api . '/sale/categories?parent.id=' . rawurlencode( $parent_id );
-		$children_resp = $this->fetch( $children_url, $access );
+		$children_resp = $this->get( $children_url, $access );
 
 		$children_file = 'GET_sale-categories_parent-' . $parent_id . '.raw.json';
 
@@ -154,7 +151,7 @@ final class CategorySamplesCommand {
 
 		// 4. Pojedyncza kategoria (osobny endpoint GET /sale/categories/{id}).
 		$single_url  = $api . '/sale/categories/' . rawurlencode( $category_id );
-		$single_resp = $this->fetch( $single_url, $access );
+		$single_resp = $this->get( $single_url, $access );
 
 		$single_file = 'GET_sale-categories_id-' . $category_id . '.raw.json';
 
@@ -204,22 +201,6 @@ final class CategorySamplesCommand {
 	}
 
 	/**
-	 * Pobiera ważny access token slotu `production/read` (rotacja on-demand P-2.3).
-	 * Kończy komendę błędem, gdy slot niepołączony / refresh wygasł / błąd sieci.
-	 *
-	 * @return string Access token (nigdy nie trafia do wyjścia poza nagłówkiem żądania).
-	 */
-	private function access_token(): string {
-		$tokens = ( new TokenRefresher() )->get_valid( Environment::PRODUCTION, Environment::ROLE_READ );
-
-		if ( is_wp_error( $tokens ) ) {
-			WP_CLI::error( sprintf( 'Brak ważnego tokenu production/read: %s', $tokens->get_error_message() ) );
-		}
-
-		return $tokens->access_token();
-	}
-
-	/**
 	 * Zwraca `id` pierwszej kategorii korzenia, która NIE jest liściem (`leaf: false`),
 	 * więc ma dzieci nadające się do przykładu traversalu. Gdy żadna nie jest oznaczona
 	 * jako nie-liść (nieoczekiwane dla korzenia), spada do pierwszej kategorii z `id`.
@@ -247,73 +228,5 @@ final class CategorySamplesCommand {
 		}
 
 		return $fallback;
-	}
-
-	/**
-	 * Wykonuje żądanie GET z tokenem bearer i wersjonowanym `Accept`.
-	 *
-	 * @param string $url    Pełny URL.
-	 * @param string $access Access token (bearer).
-	 * @return array{status:int,body:string,data:array<mixed>|null,error:string} Znormalizowany wynik.
-	 */
-	private function fetch( string $url, string $access ): array {
-		$response = wp_remote_get(
-			$url,
-			array(
-				'timeout' => self::REQUEST_TIMEOUT,
-				'headers' => array(
-					'Authorization' => 'Bearer ' . $access,
-					'Accept'        => self::ACCEPT,
-				),
-			)
-		);
-
-		if ( is_wp_error( $response ) ) {
-			return array(
-				'status' => 0,
-				'body'   => '',
-				'data'   => null,
-				'error'  => $response->get_error_message(),
-			);
-		}
-
-		$status  = (int) wp_remote_retrieve_response_code( $response );
-		$body    = (string) wp_remote_retrieve_body( $response );
-		$decoded = json_decode( $body, true );
-
-		return array(
-			'status' => $status,
-			'body'   => $body,
-			'data'   => is_array( $decoded ) ? $decoded : null,
-			'error'  => '',
-		);
-	}
-
-	/**
-	 * Zwięzły opis błędu żądania do logu (błąd transportu WP albo urwane body 4xx/5xx).
-	 * Nie trafia do plików-próbek — tylko do stdout/stderr komendy.
-	 *
-	 * @param array{status:int,body:string,data:array<mixed>|null,error:string} $resp Wynik {@see self::fetch()}.
-	 * @return string
-	 */
-	private function error_detail( array $resp ): string {
-		if ( '' !== $resp['error'] ) {
-			return $resp['error'];
-		}
-
-		return trim( substr( $resp['body'], 0, 300 ) );
-	}
-
-	/**
-	 * Zapisuje treść do pliku, kończąc komendę błędem przy niepowodzeniu.
-	 *
-	 * @param string $path     Ścieżka pliku.
-	 * @param string $contents Treść (surowy JSON verbatim albo manifest).
-	 * @return void
-	 */
-	private function write( string $path, string $contents ): void {
-		if ( false === file_put_contents( $path, $contents ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- surowy zrzut poza WP uploads; WP_Filesystem to nadmiar dla jednorazowego narzędzia CLI.
-			WP_CLI::error( sprintf( 'Nie mogę zapisać pliku: %s', $path ) );
-		}
 	}
 }
