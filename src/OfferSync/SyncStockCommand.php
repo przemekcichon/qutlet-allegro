@@ -154,6 +154,7 @@ final class SyncStockCommand {
 		$this->counters = array(
 			'pushed'        => 0,
 			'push_failed'   => 0,
+			'push_abandoned' => 0,
 			'stock_pulled'  => 0,
 			'price_pulled'  => 0,
 			'trashed'       => 0,
@@ -186,11 +187,12 @@ final class SyncStockCommand {
 		$c = $this->counters;
 		WP_CLI::success(
 			sprintf(
-				'sync-stock (%s%s): push %d (nieudane %d), pull stan %d / cena %d, kosz %d, obce środowisko %d, nieznane oferty %d, zaległy push %d, błędy %d.',
+				'sync-stock (%s%s): push %d (nieudane %d, porzucone %d), pull stan %d / cena %d, kosz %d, obce środowisko %d, nieznane oferty %d, zaległy push %d, błędy %d.',
 				$environment,
 				$full ? ', --full' : '',
 				$c['pushed'],
 				$c['push_failed'],
+				$c['push_abandoned'],
 				$c['stock_pulled'],
 				$c['price_pulled'],
 				$c['trashed'],
@@ -226,6 +228,14 @@ final class SyncStockCommand {
 	/**
 	 * Ponawia zaległe pushe (marker D-6.2.3) dla produktów WSKAZANEGO środowiska.
 	 *
+	 * Marker PORZUCONY (starszy niż {@see StockPusher::PENDING_STALE_SECONDS} —
+	 * recenzja P-6.2b) jest czyszczony BEZWARUNKOWO, nawet bez próby pusha: dla
+	 * przyczyn trwałych (brak rozpoznawalnego pochodzenia, produkt bez zarządzania
+	 * stanem) kolejne ponowienia nigdy by się nie powiodły, a bez tego czyszczenia
+	 * D-6.2.4 blokowałoby pull dla tego produktu NA ZAWSZE — cichy wyciek z syncu
+	 * bez żadnej ścieżki odzyskania. Log na poziomie `error` (nie `warning`):
+	 * to wymaga uwagi człowieka, nie samo się naprawi kolejnym przebiegiem.
+	 *
 	 * @param string $environment Środowisko przebiegu.
 	 * @return void
 	 */
@@ -253,13 +263,24 @@ final class SyncStockCommand {
 				continue;
 			}
 
-			// Obce środowisko: marker ZOSTAJE — domknie go przebieg właściwego
-			// środowiska (D-6.2.2).
 			$provenance = OfferMapper::environment_from_offer_url(
 				(string) get_post_meta( $product_id, 'allegro_url', true )
 			);
 
+			// Obce/nierozpoznane pochodzenie: znane inne środowisko domknie je
+			// samo (D-6.2.2) — marker zostaje BEZ oznaczania jako porzucony. Ale
+			// nierozpoznane (`null`) NIGDY nie dopasuje się do żadnego środowiska,
+			// więc PORZUCENIE musi rozstrzygnąć TEN przebieg, inaczej nie zrobi
+			// tego nikt.
 			if ( $provenance !== $environment ) {
+				if ( null === $provenance && StockPusher::is_abandoned_pending( $product_id ) ) {
+					++$this->counters['push_abandoned'];
+					StockPusher::clear_pending( $product_id );
+					WP_CLI::warning( sprintf( 'Produkt %d: zaległy push porzucony (brak rozpoznawalnego pochodzenia, marker starszy niż próg) — WYMAGA ręcznej interwencji; marker wyczyszczony.', $product_id ) );
+
+					continue;
+				}
+
 				++$this->counters['foreign'];
 
 				continue;
@@ -270,10 +291,20 @@ final class SyncStockCommand {
 			if ( $result['ok'] ) {
 				++$this->counters['pushed'];
 				WP_CLI::log( sprintf( '  produkt %d: zaległy push domknięty (stan %d).', $product_id, (int) $result['pushed_stock'] ) );
-			} else {
-				++$this->counters['push_failed'];
-				WP_CLI::warning( sprintf( 'Produkt %d: ponowienie pusha nieudane (%s) — marker zostaje.', $product_id, $result['detail'] ) );
+
+				continue;
 			}
+
+			if ( StockPusher::is_abandoned_pending( $product_id ) ) {
+				++$this->counters['push_abandoned'];
+				StockPusher::clear_pending( $product_id );
+				WP_CLI::warning( sprintf( 'Produkt %d: zaległy push porzucony (%s; marker starszy niż próg) — WYMAGA ręcznej interwencji; marker wyczyszczony.', $product_id, $result['detail'] ) );
+
+				continue;
+			}
+
+			++$this->counters['push_failed'];
+			WP_CLI::warning( sprintf( 'Produkt %d: ponowienie pusha nieudane (%s) — marker zostaje.', $product_id, $result['detail'] ) );
 		}
 	}
 

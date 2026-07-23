@@ -63,6 +63,19 @@ final class StockPusher {
 	public const META_PUSH_PENDING = '_qutlet_allegro_stock_push_pending';
 
 	/**
+	 * Po tylu sekundach nieudanego ponawiania marker uznajemy za PORZUCONY, nie
+	 * tylko zaległy (recenzja P-6.2b, sesja 2026-07-24): przyczyny takie jak brak
+	 * rozpoznawalnego pochodzenia produktu, brak zarządzania stanem albo brak
+	 * sekretów w `wp-config.php` NIE ustępują same z kolejnym przebiegiem crona —
+	 * bez tego progu marker blokowałby pull dla tego produktu NA ZAWSZE (D-6.2.4
+	 * każe pullowi czekać, dopóki marker istnieje), cicho wypadając z synchronizacji
+	 * bez żadnej ścieżki odzyskania. Godzina to dziesiątki cykli crona (~2 min) —
+	 * z zapasem dla przejściowych awarii sieci/tokenu, zanim uznamy sprawę za
+	 * wymagającą interwencji człowieka.
+	 */
+	private const PENDING_STALE_SECONDS = 3600;
+
+	/**
 	 * Domyślna jednostka stanu, gdy verbatim JSON oferty jej nie niesie
 	 * (100% snapshotu ma `UNIT`).
 	 */
@@ -182,6 +195,27 @@ final class StockPusher {
 	 */
 	public static function is_pending( int $product_id ): bool {
 		return '' !== (string) get_post_meta( $product_id, self::META_PUSH_PENDING, true );
+	}
+
+	/**
+	 * Czy marker zaległego pusha jest PORZUCONY — starszy niż
+	 * {@see self::PENDING_STALE_SECONDS} (recenzja P-6.2b: bez tego progu produkt
+	 * z trwałą przyczyną awarii — np. brak pochodzenia, brak zarządzania stanem —
+	 * blokowałby pull na zawsze). Wywołujący (`SyncStockCommand`) czyści marker i
+	 * loguje na poziomie wymagającym uwagi człowieka; sam `StockReconciler` o
+	 * porzuceniu nic nie wie — dostaje już wyczyszczony stan.
+	 *
+	 * @param int $product_id Id produktu.
+	 * @return bool False, gdy marker nieobecny (nie jest ani zaległy, ani porzucony).
+	 */
+	public static function is_abandoned_pending( int $product_id ): bool {
+		$marked_at = (string) get_post_meta( $product_id, self::META_PUSH_PENDING, true );
+
+		if ( '' === $marked_at || ! is_numeric( $marked_at ) ) {
+			return false;
+		}
+
+		return ( time() - (int) $marked_at ) >= self::PENDING_STALE_SECONDS;
 	}
 
 	/**
