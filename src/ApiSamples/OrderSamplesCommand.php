@@ -342,6 +342,17 @@ final class OrderSamplesCommand {
 				break;
 			}
 
+			/*
+			 * Id wybrane już w fazie 1 (po jednym na typ) POMIJAMY — bez tego dobicie
+			 * nadpisywało jego etykietę pierwszym typem z `$all`, przez co manifest/stdout
+			 * przypisywał zamówieniu inny typ zdarzenia, niż ten, który je wskazał. Selekcja
+			 * (zbiór id) była poprawna — mylił się tylko opis. Pomijanie niczego nie usuwa
+			 * z wyboru: nadpisanie istniejącego klucza i tak nie zwiększało licznika.
+			 */
+			if ( isset( $selected[ (string) $id ] ) ) {
+				continue;
+			}
+
 			$selected[ (string) $id ] = (string) $type;
 		}
 
