@@ -9,6 +9,7 @@
     "require-dev": {
         "php-stubs/wp-cli-stubs": "^2.12",
         "phpstan/phpstan": "^2.0",
+        "phpunit/phpunit": "^9.6",
         "szepeviktor/phpstan-wordpress": "^2.0"
     },
     "autoload": {
@@ -16,10 +17,16 @@
             "Qutlet\\Allegro\\": "src/"
         }
     },
+    "autoload-dev": {
+        "psr-4": {
+            "Qutlet\\Allegro\\Tests\\": "tests/"
+        }
+    },
     "config": {
         "sort-packages": true
     },
     "scripts": {
-        "phpstan": "phpstan analyse"
+        "phpstan": "phpstan analyse",
+        "test": "phpunit"
     }
 }
