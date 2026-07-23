@@ -113,6 +113,13 @@ function bootstrap(): void {
 	 * na ZREDAGOWANE próbki do repo, ten kompletne SUROWE dane, które do repo nie
 	 * trafiają nigdy (D-3A.G3). Również wyłącznie pod WP-CLI.
 	 */
+	/*
+	 * Slice OfferSync (P-6.1b): import ofert Allegro → produkty WooCommerce.
+	 * Feature rozproszony: pola rejestruje core (FAZA 5), allegro do nich pisze.
+	 * Komenda działa w pełnym kontekście WP-CLI (po `init`), więc rejestracje
+	 * meta/pól core już istnieją — uwaga o kolejności z komentarza wyżej dotyczy
+	 * hooków, nie komend.
+	 */
 	if ( defined( 'WP_CLI' ) && \WP_CLI ) {
 		\WP_CLI::add_command( 'qutlet-allegro sample-offers', ApiSamples\OfferSamplesCommand::class );
 		\WP_CLI::add_command( 'qutlet-allegro sample-categories', ApiSamples\CategorySamplesCommand::class );
@@ -120,6 +127,7 @@ function bootstrap(): void {
 		\WP_CLI::add_command( 'qutlet-allegro snapshot-offers', SandboxSeed\OfferSnapshotCommand::class );
 		\WP_CLI::add_command( 'qutlet-allegro sandbox-preflight', SandboxSeed\SandboxPreflightCommand::class );
 		\WP_CLI::add_command( 'qutlet-allegro seed-sandbox', SandboxSeed\SandboxSeedCommand::class );
+		\WP_CLI::add_command( 'qutlet-allegro import-offers', OfferSync\ImportOffersCommand::class );
 	}
 }
 
