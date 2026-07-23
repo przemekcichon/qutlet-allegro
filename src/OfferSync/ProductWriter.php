@@ -138,8 +138,12 @@ final class ProductWriter {
 			$rate = DiscountRate::effective_percent( $existing_id ?? 0 );
 			$shop = OfferMapper::shop_price( $cena_allegro, $rate );
 
-			$product->set_regular_price( (string) $shop );
-			$product->set_price( (string) $shop );
+			// number_format, nie cast: (string)float na PHP < 8.0 respektuje
+			// LC_NUMERIC (możliwe "161,1"), a Woo oczekuje kropki (recenzja P-6.1b).
+			$shop_str = number_format( $shop, 2, '.', '' );
+
+			$product->set_regular_price( $shop_str );
+			$product->set_price( $shop_str );
 		} else {
 			$warnings[] = 'Oferta bez ceny (sellingMode.price) — pominięto cenę.';
 		}

@@ -265,8 +265,14 @@ final class ImportOffersCommand {
 			if ( null === $slug ) {
 				$slug = CategoryMapRules::FALLBACK_SLUG;
 
-				if ( '' !== $leaf_id && ! isset( $unmapped[ $leaf_id ] ) ) {
-					$unmapped[ $leaf_id ] = $this->describe_path( $leaf_id, $path );
+				// Oferta bez category.id (nieobserwowana w snapshocie, ale możliwa)
+				// też musi być widoczna w rejestrze kuratora — klucz syntetyczny.
+				$registry_key = '' !== $leaf_id ? $leaf_id : 'brak-category-id:' . $offer_id;
+
+				if ( ! isset( $unmapped[ $registry_key ] ) ) {
+					$unmapped[ $registry_key ] = '' !== $leaf_id
+						? $this->describe_path( $leaf_id, $path )
+						: sprintf( 'oferta %s bez category.id', $offer_id );
 				}
 			}
 
@@ -298,7 +304,14 @@ final class ImportOffersCommand {
 			}
 		}
 
-		if ( 0 === $created + $updated ) {
+		/*
+		 * „Poprawnie pusto" ≠ awaria (recenzja P-6.1b): przebieg złożony wyłącznie z
+		 * legalnych pominięć (aukcje, nie-ACTIVE, productSet>1) kończy się sukcesem z
+		 * licznikami — komenda jest wznawialna i taki wynik jest prawidłowy. Błędem
+		 * (exit 1) kończymy tylko stan, w którym nic nie zapisano, a wystąpiły
+		 * REALNE błędy — wtedy „sukces" maskowałby awarię.
+		 */
+		if ( 0 === $created + $updated && $failed > 0 ) {
 			WP_CLI::error(
 				sprintf(
 					'Import nie zapisał żadnego produktu (pominięte: %d, błędy: %d).',
