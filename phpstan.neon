@@ -12,5 +12,16 @@ parameters:
     excludePaths:
         - vendor/
     # Stuby WP-CLI (klasa WP_CLI, WP_CLI\Utils\*) — komenda ApiSamples (P-3.1a).
+    # Stuby WooCommerce i ACF PRO — twarde zależności (D-G5), konsumowane przez
+    # import OfferSync (P-6.1b: WC_Product_Simple, WC_Tax, update_field itd.).
     scanFiles:
         - vendor/php-stubs/wp-cli-stubs/wp-cli-stubs.php
+        - vendor/php-stubs/woocommerce-stubs/woocommerce-stubs.php
+        - vendor/php-stubs/acf-pro-stubs/acf-pro-stubs.php
+    # Źródła qutlet-core (twarda zależność, D-G5) — OfferSync czyta stałe meta
+    # (RawLayerMeta, AllegroLinkMeta) i stawkę (Pricing\DiscountRate) z klas core.
+    # Ścieżka względna działa w instalacji WP (pluginy-siostry w wp-content/plugins);
+    # analiza poza instalacją wymaga obecności qutlet-core obok (jak vendor/ — lokalna
+    # materializacja środowiska).
+    scanDirectories:
+        - ../qutlet-core/src
