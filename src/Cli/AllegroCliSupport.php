@@ -44,6 +44,11 @@ trait AllegroCliSupport {
 
 	/**
 	 * Wersjonowany media type Allegro REST API — `Accept` (i `Content-Type` przy ciele).
+	 *
+	 * Własność statyczna, NIE stała traitu: stałe w traitach wymagają PHP 8.2, a wtyczka
+	 * deklaruje `Requires PHP: 7.4` (nagłówek + `composer.json`). Wartość jest niezmienna.
+	 *
+	 * @var string
 	 */
 	private static $allegro_media_type = 'application/vnd.allegro.public.v1+json';
 
