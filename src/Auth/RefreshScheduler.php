@@ -15,14 +15,19 @@ namespace Qutlet\Allegro\Auth;
  * Droga on-demand ({@see TokenRefresher::get_valid()}) jest podstawowa; cron to
  * siatka bezpieczeństwa.
  *
- * WP-Cron (nie systemowy) — świadoma decyzja, rozgraniczenie względem D-6.G1:
- * D-6.G1 nakazuje SYSTEMOWY cron tylko dla zadań o kadencji krytycznej (sync stanów
- * magazynowych „co 2 min", której WP-Cron nie gwarantuje). Odświeżanie tokenu ma
- * kadencję GODZINOWĄ (access żyje 12 h), więc WP-Cron w zupełności wystarcza i NIE
- * wymaga handoffu do systemowego crona ani `DISABLE_WP_CRON`. Znane ograniczenie
- * WP-Cron (odpala się przy ruchu HTTP) jest tu nieszkodliwe: na produkcji ruch
- * istnieje, a lokalnie i tak podstawą jest on-demand, zaś przebieg da się wywołać
- * ręcznie (`wp cron event run {@see self::CRON_HOOK}`).
+ * WP-Cron — świadoma decyzja, rozgraniczenie względem D-6.G1: D-6.G1 (ZREWIDOWANE
+ * 2026-07-24 — patrz {@see \Qutlet\Allegro\OfferSync\StockSyncScheduler}) i tak
+ * używa WP-Cron dla sync stanów magazynowych (własny interwał ~2 min przez filtr
+ * `cron_schedules`), więc granica dziś nie jest „WP-Cron vs systemowy cron", tylko
+ * „wymaga JEDNEGO niezawodnego zewnętrznego tyknięcia (`wp cron event run
+ * --due-now`, konfiguracja na Local = handoff) czy nie". Odświeżanie tokenu ma
+ * kadencję GODZINOWĄ (access żyje 12 h) i NIE jest czasowo-krytyczne — pageview-owy
+ * pseudo-cron (albo brak ruchu przez dłuższą chwilę) mu nie zaszkodzi, bo podstawą
+ * jest odświeżanie on-demand (`TokenRefresher::get_valid()`), a to zdarzenie jest
+ * wyłącznie zabezpieczeniem. Nawet gdy `DISABLE_WP_CRON=true` (bo sync stanów tego
+ * wymaga), to samo tyknięcie `wp cron event run --due-now`, które obsługuje sync,
+ * odpali też TO zdarzenie, gdy jest due — nie potrzeba nic dodatkowego. Przebieg
+ * da się też wywołać ręcznie (`wp cron event run {@see self::CRON_HOOK}`).
  *
  * Odświeżamy tylko sloty, które: (a) są połączone, (b) mają jeszcze ważny refresh
  * (inaczej potrzeba ponownej autoryzacji — nie ma czym odświeżać) i (c) access

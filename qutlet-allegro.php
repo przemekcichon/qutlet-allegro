@@ -54,6 +54,12 @@ add_action( 'plugins_loaded', __NAMESPACE__ . '\\bootstrap' );
  */
 register_deactivation_hook( __FILE__, __NAMESPACE__ . '\\Auth\\RefreshScheduler::unschedule' );
 
+/*
+ * Dezaktywacja: usuń zdarzenia WP-Cron synchronizacji stanów (P-6.2b, D-6.G1
+ * zrewidowane) — ten sam powód co wyżej (osierocony harmonogram).
+ */
+register_deactivation_hook( __FILE__, __NAMESPACE__ . '\\OfferSync\\StockSyncScheduler::unschedule' );
+
 /**
  * Punkt wejścia wtyczki. Uruchamiany na `plugins_loaded`.
  *
@@ -140,6 +146,15 @@ function bootstrap(): void {
 		\WP_CLI::add_command( 'qutlet-allegro seed-sandbox', SandboxSeed\SandboxSeedCommand::class );
 		\WP_CLI::add_command( 'qutlet-allegro import-offers', OfferSync\ImportOffersCommand::class );
 		\WP_CLI::add_command( 'qutlet-allegro sync-stock', OfferSync\SyncStockCommand::class );
+
+		/*
+		 * Harmonogram sync-stock (D-6.G1 zrewidowane, P-6.2b): rejestracja pod tym
+		 * samym guardem co komenda — JEDYNY sposób odpalenia zdarzeń WP-Cron to
+		 * `wp cron event run`, które i tak jest procesem WP-CLI (patrz docblock
+		 * `StockSyncScheduler`); zwykły request HTTP nic by tu nie odpalił przy
+		 * `DISABLE_WP_CRON=true`.
+		 */
+		( new OfferSync\StockSyncScheduler() )->register();
 	}
 }
 

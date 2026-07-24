@@ -17,8 +17,11 @@ use function WP_CLI\Utils\get_flag_value;
 
 /**
  * `wp qutlet-allegro sync-stock` — utrzymanie synchronu stanów magazynowych
- * (i cen — mapping §5) między Allegro a Woo, odpalane SYSTEMOWYM cronem co ~2 min
- * (D-6.G1; WP-Cron nie daje tej kadencji — konfiguracja crona na Local = handoff).
+ * (i cen — mapping §5) między Allegro a Woo. Odpalane ręcznie (debug/testy) albo
+ * przez WP-Cron ({@see StockSyncScheduler}, D-6.G1 zrewidowane 2026-07-24: własny
+ * interwał ~2 min zamiast bezpośredniego wywołania z systemowego crona; systemowy
+ * cron na Local tyka JEDNĄ linią `wp cron event run --due-now` — konfiguracja
+ * crona = handoff, ale prościej niż poprzednia wersja).
  *
  * ## Model D-6.G3 (rozstrzygnięty 2026-07-23)
  * - Woo → Allegro: sprzedaż w sklepie pushuje NATYCHMIAST hookiem
