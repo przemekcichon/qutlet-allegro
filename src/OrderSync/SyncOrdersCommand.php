@@ -266,6 +266,8 @@ final class SyncOrdersCommand {
 			WP_CLI::log( sprintf( 'Zdarzenia wskazują %d zamówień READY_FOR_PROCESSING do importu.', count( $form_ids ) ) );
 		}
 
+		$fetch_error = false;
+
 		foreach ( array_keys( $form_ids ) as $form_id ) {
 			$status = $this->import_order( $api, $access, (string) $form_id );
 
@@ -274,6 +276,21 @@ final class SyncOrdersCommand {
 
 				return null;
 			}
+
+			if ( 'error' === $status ) {
+				// Nie przerywamy — inne zdrowe zamówienia z tego okna importujemy dalej;
+				// ale zapamiętujemy, że kursora NIE wolno przesunąć (patrz niżej).
+				$fetch_error = true;
+			}
+		}
+
+		if ( $fetch_error ) {
+			// Choć jedno zamówienie nie dało się pobrać (błąd przejściowy) — kursor
+			// ZOSTAJE, żeby następny przebieg ponowił całe okno i dociągnął pominięte
+			// (D-6.3.2). Zdrowe zamówienia już zapisane; ponowny upsert to NO-OP.
+			WP_CLI::warning( 'Część zamówień nie została pobrana (błędy przejściowe) — kursor bez zmian, następny przebieg ponowi okno.' );
+
+			return null;
 		}
 
 		update_option( $option, $last_id, false );
@@ -283,12 +300,15 @@ final class SyncOrdersCommand {
 
 	/**
 	 * Pobiera autorytatywną treść zamówienia i robi upsert `WC_Order`. Zwraca
-	 * `rate-limited`, gdy trafi na 429 (wołający przerywa BEZ przesuwania kursora).
+	 * `rate-limited` przy 429 (wołający przerywa BEZ przesuwania kursora) oraz `error`
+	 * przy przejściowym błędzie pobrania treści (wołający WSTRZYMUJE kursor, ale
+	 * dokańcza pozostałe zamówienia). `skip` = świadome pominięcie z przesunięciem
+	 * kursora (404 zniknęło / nie-READY w checkout-form).
 	 *
 	 * @param string $api     Baza REST API.
 	 * @param string $access  Access token slotu `read`.
 	 * @param string $form_id `checkoutForm.id`.
-	 * @return string `ok` / `skip` / `rate-limited`.
+	 * @return string `ok` / `skip` / `error` / `rate-limited`.
 	 */
 	private function import_order( string $api, string $access, string $form_id ): string {
 		$resp = $this->get( $api . '/order/checkout-forms/' . rawurlencode( $form_id ), $access );
@@ -305,10 +325,17 @@ final class SyncOrdersCommand {
 		}
 
 		if ( 200 !== $resp['status'] || ! is_array( $resp['data'] ) ) {
+			// Błąd PRZEJŚCIOWY pobrania treści (5xx/sieć), inny niż 404 (zniknęło) —
+			// zwracamy `error`, żeby wołający WSTRZYMAŁ kursor: bez toru rekoncyliacji
+			// (odpowiednika `--full` w SyncStockCommand) przesunięcie kursora nad
+			// nieodczytane zamówienie zgubiłoby OPŁACONĄ sprzedaż na zawsze (D-6.3.2 —
+			// realna sprzedaż nie może zniknąć; zdarzenie READY zwykle się nie powtarza).
+			// Kolejny przebieg ponowi całe okno — upsert jest idempotentny (rewizja NO-OP),
+			// więc zdrowe zamówienia to tanie NO-OP-y.
 			++$this->counters['errors'];
 			WP_CLI::warning( sprintf( 'Zamówienie %s: checkout-forms → HTTP %d %s', $form_id, $resp['status'], $this->error_detail( $resp ) ) );
 
-			return 'skip';
+			return 'error';
 		}
 
 		$form = $resp['data'];
