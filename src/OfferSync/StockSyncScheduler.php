@@ -29,11 +29,28 @@ use WP_CLI;
  *
  * Wzorzec identyczny z {@see \Qutlet\Allegro\Auth\RefreshScheduler}: self-healing
  * zaplanowanie na `init`, `wp_clear_scheduled_hook` przy dezaktywacji. Dwa zdarzenia:
- * przyrostowe (~2 min, {@see self::CRON_HOOK}) i pełna rekoncyliacja (~30 min,
+ * przyrostowe (~1 min, {@see self::CRON_HOOK}) i pełna rekoncyliacja (~30 min,
  * {@see self::CRON_HOOK_FULL} — zmierzone na realnym sandboksie: `--full` na
  * 555 ofertach trwa pojedyncze sekundy, w przeciwieństwie do pełnego importu
  * P-6.1b; użytkownik wybrał 30 min zamiast pierwotnie rozważanej nocnej kadencji
- * właśnie dzięki tej niskiej cenie przebiegu).
+ * właśnie dzięki tej niskiej cenie przebiegu). Kadencja przyrostowa zrewidowana
+ * z ~2 min na 1 min (sesja 2026-07-24): systemowy tick i tak leci co 1 min
+ * (handoff), więc dokładniejszy interwał zdarzenia jest „za darmo" — mniejsze
+ * opóźnienie wykrycia zmiany, bez dodatkowego kosztu.
+ *
+ * ## Dlaczego OBA środowiska na każdym tyknięciu (poprawka po realnym teście)
+ * Pierwsza wersja celowo pracowała TYLKO na `Environment::PRODUCTION` — założenie
+ * było „sandbox zostaje ręcznym narzędziem deweloperskim". W praktyce (sesja
+ * 2026-07-24, realny test na Local) to założenie okazało się mylące: deweloperskie
+ * testowanie na sandboksie trwa równolegle z uruchomioną automatyzacją produkcyjną,
+ * więc harmonogram MUSI obejmować oba środowiska — dokładnie jak
+ * {@see \Qutlet\Allegro\Auth\RefreshScheduler}, który też leci po WSZYSTKICH
+ * slotach (środowisko × rola), nie tylko produkcyjnych. Koszt jest pomijalny:
+ * sandbox i produkcja to OSOBNE aplikacje/limity Allegro (D-2.G3), więc podwojenie
+ * liczby wywołań nie zagraża żadnemu współdzielonemu rate limitowi. Kolejność
+ * ({@see self::ENVIRONMENTS}) — produkcja pierwsza, jak w
+ * `RefreshScheduler::slots()` — dla spójności, choć fault-isolation niżej sprawia,
+ * że kolejność nie wpływa już na to, czy drugie środowisko dostanie szansę.
  *
  * ## Dlaczego `WP_CLI::runcommand()`, nie bezpośrednie wywołanie `SyncStockCommand`
  * `wp cron event run --due-now` to pełny proces WP-CLI, więc `WP_CLI::error()`
@@ -43,9 +60,23 @@ use WP_CLI;
  * `exit_error => false` uruchamia komendę W TYM SAMYM procesie (bez nowego
  * PHP — `launch => false`), ale zamienia `exit()` na zwykły powrót z kodem błędu.
  *
- * Cel produkcyjny: harmonogram celowo pracuje na `Environment::PRODUCTION` (D-6.G5
- * — sandbox zostaje ręcznym narzędziem deweloperskim, `wp qutlet-allegro
- * sync-stock` bez flagi).
+ * ## Izolacja błędów między środowiskami (poprawka po niezależnej recenzji PR #14)
+ * `exit_error => false` neutralizuje WYŁĄCZNIE ścieżkę `WP_CLI::error()`/
+ * `ExitException` — nie chroni przed innym `\Throwable` (np. `TypeError` z
+ * nietypowej odpowiedzi API), który przerwałby `foreach` w
+ * {@see self::run_incremental()}/{@see self::run_full()} i zostawił KOLEJNE
+ * środowisko bez szansy wykonania w tym tyknięciu, bez śladu w logu. Inaczej niż
+ * `RefreshScheduler::run()`, który dostaje tę gwarancję „za darmo" (jego
+ * `TokenRefresher::refresh()` ZWRACA `WP_Error`, nigdy nie rzuca), tu trzeba to
+ * zrobić jawnie — {@see self::run_command()} łapie `\Throwable` per środowisko.
+ *
+ * ## Samonaprawa OBEJMUJE zmianę interwału, nie tylko brak zaplanowania
+ * {@see self::ensure_scheduled()} nie tylko planuje zdarzenie, gdy go brak — także
+ * PRZEPLANOWUJE, gdy zdarzenie istnieje pod INNYM harmonogramem niż aktualnie
+ * zarejestrowany (np. po tej właśnie rewizji kadencji z ~2 min na ~1 min). Bez
+ * tego istniejące zdarzenie zostałoby na starym interwale aż do ręcznego
+ * `wp cron event delete` — samonaprawa musi obejmować też zmiany w kodzie, nie
+ * tylko brak wpisu.
  */
 final class StockSyncScheduler {
 
@@ -62,12 +93,14 @@ final class StockSyncScheduler {
 	/**
 	 * Identyfikator własnego harmonogramu przyrostowego (filtr `cron_schedules`).
 	 */
-	private const SCHEDULE_INCREMENTAL = 'qutlet_allegro_two_minutes';
+	private const SCHEDULE_INCREMENTAL = 'qutlet_allegro_one_minute';
 
 	/**
-	 * Kadencja przyrostowa w sekundach (D-6.G1: cel „co ~2 min").
+	 * Kadencja przyrostowa w sekundach — D-6.G1 celuje w „co ~2 min", ale
+	 * dopasowana do kadencji systemowego ticku (~1 min, handoff) nie kosztuje nic
+	 * ekstra (sesja 2026-07-24).
 	 */
-	private const INTERVAL_SECONDS = 2 * MINUTE_IN_SECONDS;
+	private const INTERVAL_SECONDS = MINUTE_IN_SECONDS;
 
 	/**
 	 * Identyfikator własnego harmonogramu pełnej rekoncyliacji (filtr
@@ -81,6 +114,15 @@ final class StockSyncScheduler {
 	 * ofertach): 30 min zamiast pierwotnie rozważanej nocnej kadencji.
 	 */
 	private const INTERVAL_SECONDS_FULL = 30 * MINUTE_IN_SECONDS;
+
+	/**
+	 * Oba środowiska — patrz docblock klasy („Dlaczego OBA środowiska…"), wzorzec
+	 * z `Auth\RefreshScheduler::slots()` (tam też oba środowiska, każda oś osobno;
+	 * kolejność produkcja→sandbox dla spójności z tamtym wzorcem).
+	 *
+	 * @var array<int,string>
+	 */
+	private const ENVIRONMENTS = array( Environment::PRODUCTION, Environment::SANDBOX );
 
 	/**
 	 * Wpina hooki: własny interwał, oba zdarzenia crona i samonaprawialne
@@ -99,7 +141,7 @@ final class StockSyncScheduler {
 	}
 
 	/**
-	 * Dokłada własne interwały (~2 min, ~30 min) do harmonogramów WP (wbudowane
+	 * Dokłada własne interwały (~1 min, ~30 min) do harmonogramów WP (wbudowane
 	 * kończą się na `daily`) — filtr `cron_schedules`.
 	 *
 	 * @param array<string,array{interval:int,display:string}> $schedules Harmonogramy WP.
@@ -108,7 +150,7 @@ final class StockSyncScheduler {
 	public static function add_schedule( array $schedules ): array {
 		$schedules[ self::SCHEDULE_INCREMENTAL ] = array(
 			'interval' => self::INTERVAL_SECONDS,
-			'display'  => __( 'Co 2 minuty (qutlet-allegro sync-stock)', 'qutlet-allegro' ),
+			'display'  => __( 'Co minutę (qutlet-allegro sync-stock)', 'qutlet-allegro' ),
 		);
 
 		$schedules[ self::SCHEDULE_FULL ] = array(
@@ -120,18 +162,36 @@ final class StockSyncScheduler {
 	}
 
 	/**
-	 * Idempotentnie planuje oba zdarzenia, jeśli nie są jeszcze zaplanowane.
+	 * Idempotentnie planuje oba zdarzenia — brakujące planuje od nowa, a
+	 * zaplanowane pod NIEAKTUALNYM harmonogramem (np. po rewizji kadencji w
+	 * kodzie) przeplanowuje pod aktualny (patrz docblock klasy „Samonaprawa
+	 * OBEJMUJE zmianę interwału").
 	 *
 	 * @return void
 	 */
 	public static function ensure_scheduled(): void {
-		if ( false === wp_next_scheduled( self::CRON_HOOK ) ) {
-			wp_schedule_event( time(), self::SCHEDULE_INCREMENTAL, self::CRON_HOOK );
+		self::ensure_hook_schedule( self::CRON_HOOK, self::SCHEDULE_INCREMENTAL );
+		self::ensure_hook_schedule( self::CRON_HOOK_FULL, self::SCHEDULE_FULL );
+	}
+
+	/**
+	 * Planuje pojedynczy hook pod wskazanym harmonogramem — od nowa, jeśli
+	 * nie istnieje, albo przeplanowuje, jeśli istnieje pod INNYM harmonogramem
+	 * niż `$schedule` (kod się zmienił, zaplanowane zdarzenie jeszcze nie).
+	 *
+	 * @param string $hook     Nazwa zdarzenia crona.
+	 * @param string $schedule Docelowy identyfikator harmonogramu (`cron_schedules`).
+	 * @return void
+	 */
+	private static function ensure_hook_schedule( string $hook, string $schedule ): void {
+		$scheduled = wp_get_scheduled_event( $hook );
+
+		if ( false !== $scheduled && $schedule === $scheduled->schedule ) {
+			return;
 		}
 
-		if ( false === wp_next_scheduled( self::CRON_HOOK_FULL ) ) {
-			wp_schedule_event( time(), self::SCHEDULE_FULL, self::CRON_HOOK_FULL );
-		}
+		wp_clear_scheduled_hook( $hook );
+		wp_schedule_event( time(), $schedule, $hook );
 	}
 
 	/**
@@ -145,37 +205,49 @@ final class StockSyncScheduler {
 	}
 
 	/**
-	 * Callback: przyrostowy pull + ponowienie zaległych pushy.
+	 * Callback: przyrostowy pull + ponowienie zaległych pushy, dla obu środowisk.
 	 *
 	 * @return void
 	 */
 	public function run_incremental(): void {
-		self::run_command( 'wp qutlet-allegro sync-stock --environment=' . Environment::PRODUCTION );
+		foreach ( self::ENVIRONMENTS as $environment ) {
+			self::run_command( 'wp qutlet-allegro sync-stock --environment=' . $environment );
+		}
 	}
 
 	/**
-	 * Callback: pełna rekoncyliacja katalogu.
+	 * Callback: pełna rekoncyliacja katalogu, dla obu środowisk.
 	 *
 	 * @return void
 	 */
 	public function run_full(): void {
-		self::run_command( 'wp qutlet-allegro sync-stock --environment=' . Environment::PRODUCTION . ' --full' );
+		foreach ( self::ENVIRONMENTS as $environment ) {
+			self::run_command( 'wp qutlet-allegro sync-stock --environment=' . $environment . ' --full' );
+		}
 	}
 
 	/**
 	 * Uruchamia komendę w TYM SAMYM procesie WP-CLI, bez `exit()` na błędzie —
-	 * patrz docblock klasy („Dlaczego `WP_CLI::runcommand()`").
+	 * patrz docblock klasy („Dlaczego `WP_CLI::runcommand()`"). Łapie też KAŻDY
+	 * inny `\Throwable` (patrz docblock klasy „Izolacja błędów między
+	 * środowiskami") — awaria jednego środowiska w pętli
+	 * {@see self::run_incremental()}/{@see self::run_full()} nie może odebrać
+	 * szansy kolejnemu.
 	 *
 	 * @param string $command Pełna komenda WP-CLI (bez wiodącego `wp `).
 	 * @return void
 	 */
 	private static function run_command( string $command ): void {
-		WP_CLI::runcommand(
-			preg_replace( '/^wp\s+/', '', $command ),
-			array(
-				'launch'     => false,
-				'exit_error' => false,
-			)
-		);
+		try {
+			WP_CLI::runcommand(
+				preg_replace( '/^wp\s+/', '', $command ),
+				array(
+					'launch'     => false,
+					'exit_error' => false,
+				)
+			);
+		} catch ( \Throwable $e ) {
+			WP_CLI::warning( sprintf( '%s: nieoczekiwany wyjątek — %s', $command, $e->getMessage() ) );
+		}
 	}
 }
