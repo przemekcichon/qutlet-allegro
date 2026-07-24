@@ -103,7 +103,9 @@ final class BackfillOrderAttributionCommand {
 				++$checked;
 
 				if ( $dry_run ) {
-					WP_CLI::log( sprintf( '  (dry-run) zamówienie %d dostałoby atrybucję „Referral: Allegro".', $order->get_id() ) );
+					// Etykieta wprost z {@see OrderMapper::origin_label_preview()} — jedno
+					// źródło, nie zahardkodowany duplikat stringa „Referral: Allegro".
+					WP_CLI::log( sprintf( '  (dry-run) zamówienie %d dostałoby atrybucję „%s".', $order->get_id(), OrderMapper::origin_label_preview() ) );
 					continue;
 				}
 

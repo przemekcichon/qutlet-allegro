@@ -316,6 +316,21 @@ final class OrderMapper {
 	public const ATTRIBUTION_SOURCE_TYPE = 'referral';
 
 	/**
+	 * Podgląd etykiety Origin, jaką ustawi {@see OrderWriter::apply_attribution()} —
+	 * WYŁĄCZNIE do logów CLI ({@see BackfillOrderAttributionCommand}), żeby komunikat
+	 * `--dry-run` nie duplikował stringa poza jednym źródłem (`referral` +
+	 * {@see self::payment_title()} → szablon `OrderAttributionMeta::get_origin_label()`
+	 * dla `source_type = referral`: „Referral: %s"). NIE jest to wywołanie realnego
+	 * kodu WooCommerce (ta klasa jest celowo bez zależności od WP) — tylko odtworzenie
+	 * tego samego formatu po naszej stronie dla spójnego komunikatu.
+	 *
+	 * @return string
+	 */
+	public static function origin_label_preview(): string {
+		return sprintf( 'Referral: %s', self::payment_title() );
+	}
+
+	/**
 	 * Identyfikator transakcji Allegro (`payment.id`, mapping §8c → `transaction_id`).
 	 *
 	 * @param array<string,mixed> $form Pełna zwrotka zamówienia.

@@ -226,6 +226,18 @@ final class OrderMapperTest extends TestCase {
 		$this->assertNull( OrderMapper::payment_date_paid( array() ) );
 	}
 
+	/**
+	 * Atrybucja Origin (kontrakt §12.6, D-6.6.1): `source_type` VERBATIM z kontraktu
+	 * ORAZ podgląd etykiety ({@see OrderMapper::origin_label_preview()}) faktycznie
+	 * SKŁADAJĄCY `referral` + {@see OrderMapper::payment_title()} w format
+	 * `OrderAttributionMeta::get_origin_label()` dla `source_type = referral` — nie
+	 * tylko powtórzenie stałej (kompozycja stringów, nie „literał == sam siebie").
+	 */
+	public function test_attribution_source_type_and_origin_label_preview(): void {
+		$this->assertSame( 'referral', OrderMapper::ATTRIBUTION_SOURCE_TYPE );
+		$this->assertSame( 'Referral: Allegro', OrderMapper::origin_label_preview() );
+	}
+
 	public function test_total_and_customer_note(): void {
 		$this->assertSame( 159.0, OrderMapper::total( $this->order_courier() ) );
 		$this->assertNull( OrderMapper::total( array() ) );
