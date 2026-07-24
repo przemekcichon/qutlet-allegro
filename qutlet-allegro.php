@@ -148,6 +148,14 @@ function bootstrap(): void {
 		\WP_CLI::add_command( 'qutlet-allegro sync-stock', OfferSync\SyncStockCommand::class );
 
 		/*
+		 * Slice OrderSync (P-6.3b): import zamówień Allegro → natywne WC_Order.
+		 * Przyrostowy polling `GET /order/events` z własnym kursorem (kontrakt §12.3,
+		 * osobny od kursora stanów P-6.2). Wyłącznie komenda (scheduler WP-Cron to
+		 * osobny, przyszły punkt — D-6.3.3). Slot `read` (D-6.G5).
+		 */
+		\WP_CLI::add_command( 'qutlet-allegro sync-orders', OrderSync\SyncOrdersCommand::class );
+
+		/*
 		 * Harmonogram sync-stock (D-6.G1 zrewidowane, P-6.2b): rejestracja pod tym
 		 * samym guardem co komenda — JEDYNY sposób odpalenia zdarzeń WP-Cron to
 		 * `wp cron event run`, które i tak jest procesem WP-CLI (patrz docblock
