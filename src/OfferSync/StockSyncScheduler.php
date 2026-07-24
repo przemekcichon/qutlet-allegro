@@ -52,6 +52,33 @@ use WP_CLI;
  * `RefreshScheduler::slots()` — dla spójności, choć fault-isolation niżej sprawia,
  * że kolejność nie wpływa już na to, czy drugie środowisko dostanie szansę.
  *
+ * ## Konfigurowalne środowiska bez deploya (P-6.2c)
+ * Domyślnie harmonogram obejmuje OBA środowiska ({@see self::ENVIRONMENTS}), ale
+ * lista jest przesłanialna stałą `wp-config.php`
+ * ({@see self::ENVIRONMENTS_CONSTANT}) — string CSV, np. `"production"` albo
+ * `"sandbox,production"` (D-6.2c.1). Motyw jak sekrety Allegro (D-2.G3) i klucze
+ * AI: konfiguracja operacyjna środowiska, przełączalna bez branch/PR/merge, NIE
+ * ustawienie biznesowe w bazie/adminie. Rozstrzygnięcie ({@see self::plan_environments()}):
+ * - stała NIEZDEFINIOWANA → fallback = oba środowiska (D-6.2c.2 — zawężenie ma
+ *   wymagać ŚWIADOMEGO wpisu, nie być domyślne);
+ * - stała z ≥1 prawidłowym środowiskiem, ale i literówką → używamy prawidłowego
+ *   podzbioru, literówkę LOGUJEMY (`WP_CLI::warning`) — operator ją widzi, ale
+ *   automatyka prawidłowego środowiska działa;
+ * - stała bez ANI JEDNEGO prawidłowego środowiska (pusta, sama literówka, nie-string)
+ *   → TWARDY błąd `WP_CLI::error` (D-6.2c.3, decyzja użytkownika).
+ *
+ * ## Twardy błąd konfiguracji vs izolacja błędów runtime (świadome napięcie)
+ * Sekcja niżej („Izolacja błędów…") gwarantuje, że przejściowa awaria RUNTIME
+ * jednego środowiska (np. `TypeError` z nietypowej odpowiedzi API) nie ubija
+ * tyknięcia — kolejne środowisko i inne due zdarzenia dostają szansę. Twardy błąd
+ * na złej KONFIGURACJI (D-6.2c.3) świadomie łamie tę zasadę: `WP_CLI::error()`
+ * kończy proces `wp cron event run` na tym tyknięciu, w tym inne due zdarzenia.
+ * To celowe rozróżnienie: błąd runtime jest przejściowy (mija sam, warto próbować
+ * dalej), błędna konfiguracja jest trwała (nie „minie" bez interwencji), więc ma
+ * być głośna i natychmiast widoczna, nie wyciszona do warna, który utonie w logu
+ * crona. Dotyczy WYŁĄCZNIE przypadku „zero prawidłowych środowisk" — literówka
+ * obok prawidłowego środowiska degraduje się miękko (warning + podzbiór).
+ *
  * ## Dlaczego `WP_CLI::runcommand()`, nie bezpośrednie wywołanie `SyncStockCommand`
  * `wp cron event run --due-now` to pełny proces WP-CLI, więc `WP_CLI::error()`
  * wewnątrz {@see SyncStockCommand} DZIAŁA — ale jego domyślne zachowanie to
@@ -116,13 +143,27 @@ final class StockSyncScheduler {
 	private const INTERVAL_SECONDS_FULL = 30 * MINUTE_IN_SECONDS;
 
 	/**
-	 * Oba środowiska — patrz docblock klasy („Dlaczego OBA środowiska…"), wzorzec
-	 * z `Auth\RefreshScheduler::slots()` (tam też oba środowiska, każda oś osobno;
+	 * Kanoniczny słownik prawidłowych środowisk ORAZ fallback, gdy stała
+	 * {@see self::ENVIRONMENTS_CONSTANT} jest niezdefiniowana (P-6.2c, D-6.2c.2 —
+	 * brak stałej = oba środowiska). Pełni podwójną rolę, bo dziś fallback = pełny
+	 * zbiór; służy też jako lista dozwolonych wartości przy walidacji stałej
+	 * ({@see self::plan_environments()}) i jako kolejność kanoniczna wyniku (parser
+	 * porządkuje po tej tablicy — produkcja pierwsza, niezależnie od kolejności w
+	 * CSV). Patrz docblock klasy („Dlaczego OBA środowiska…"), wzorzec z
+	 * `Auth\RefreshScheduler::slots()` (tam też oba środowiska, każda oś osobno;
 	 * kolejność produkcja→sandbox dla spójności z tamtym wzorcem).
 	 *
 	 * @var array<int,string>
 	 */
 	private const ENVIRONMENTS = array( Environment::PRODUCTION, Environment::SANDBOX );
+
+	/**
+	 * Nazwa stałej `wp-config.php` przesłaniającej listę środowisk harmonogramu
+	 * (P-6.2c, D-6.2c.1). Wartość: string CSV, np. `"production"` albo
+	 * `"sandbox,production"` — skalar, bo narzędzia typu `edit_wp_config` (MCP)
+	 * przyjmują tylko literały skalarne. Motyw stałych Allegro (D-2.G3).
+	 */
+	private const ENVIRONMENTS_CONSTANT = 'QUTLET_ALLEGRO_SYNC_STOCK_ENVIRONMENTS';
 
 	/**
 	 * Wpina hooki: własny interwał, oba zdarzenia crona i samonaprawialne
@@ -210,7 +251,7 @@ final class StockSyncScheduler {
 	 * @return void
 	 */
 	public function run_incremental(): void {
-		foreach ( self::ENVIRONMENTS as $environment ) {
+		foreach ( self::configured_environments() as $environment ) {
 			self::run_command( 'wp qutlet-allegro sync-stock --environment=' . $environment );
 		}
 	}
@@ -221,9 +262,143 @@ final class StockSyncScheduler {
 	 * @return void
 	 */
 	public function run_full(): void {
-		foreach ( self::ENVIRONMENTS as $environment ) {
+		foreach ( self::configured_environments() as $environment ) {
 			self::run_command( 'wp qutlet-allegro sync-stock --environment=' . $environment . ' --full' );
 		}
+	}
+
+	/**
+	 * Rozstrzyga listę środowisk do przebiegu ze stałej `wp-config.php` (P-6.2c) i
+	 * DZIAŁA na wyniku {@see self::plan_environments()} — loguje ostrzeżenie o
+	 * pominiętych literówkach, a przy zerze prawidłowych środowisk kończy tyknięcie
+	 * twardym błędem (D-6.2c.3, patrz docblock klasy „Twardy błąd konfiguracji…").
+	 * Cienka warstwa impuratywna: odczyt stałej + dyspozycja do WP-CLI; cała logika
+	 * decyzji jest w czystym {@see self::plan_environments()} (testowalna bez WP).
+	 *
+	 * @return array<int,string> Środowiska do przebiegu (kolejność kanoniczna).
+	 */
+	private static function configured_environments(): array {
+		$is_defined = \defined( self::ENVIRONMENTS_CONSTANT );
+		$raw        = $is_defined ? \constant( self::ENVIRONMENTS_CONSTANT ) : null;
+
+		$plan = self::plan_environments( $is_defined, $raw );
+
+		if ( null !== $plan['warning'] ) {
+			WP_CLI::warning( $plan['warning'] );
+		}
+
+		if ( null !== $plan['error'] ) {
+			WP_CLI::error( $plan['error'] ); // Twardy stop (D-6.2c.3) — exit(1), ubija ten tick `cron event run`.
+		}
+
+		return $plan['environments'];
+	}
+
+	/**
+	 * Czysta decyzja P-6.2c: co robić z (nie)zdefiniowaną stałą środowisk. Bez WP,
+	 * bez efektów ubocznych — sama dyspozycja jako dane, żeby wszystkie gałęzie
+	 * (fallback / warning-podzbiór / twardy błąd) były testowalne bez runtime.
+	 * Wywołujący ({@see self::configured_environments()}) zamienia `warning`/`error`
+	 * na wywołania WP-CLI.
+	 *
+	 * Reguły:
+	 * - stała niezdefiniowana → `environments` = {@see self::ENVIRONMENTS} (fallback, D-6.2c.2);
+	 * - stała nie-string → twardy `error` (skalar CSV wymagany, D-6.2c.1);
+	 * - ≥1 prawidłowe środowisko → `environments` = prawidłowy podzbiór; literówki
+	 *   (jeśli są) idą do `warning` (użyj poprawnych, ostrzeż o błędnych);
+	 * - zero prawidłowych (pusty string / same literówki) → twardy `error` (D-6.2c.3).
+	 * `error` i `environments` wykluczają się: gdy `error` ustawiony, `environments`
+	 * jest puste (wywołujący i tak zakończy proces przed pętlą).
+	 *
+	 * @param bool  $is_defined Czy stała jest zdefiniowana w `wp-config.php`.
+	 * @param mixed $raw        Wartość stałej (dowolny typ; istotna tylko gdy `$is_defined`).
+	 * @return array{environments:array<int,string>,warning:?string,error:?string}
+	 */
+	public static function plan_environments( bool $is_defined, $raw ): array {
+		if ( ! $is_defined ) {
+			return array(
+				'environments' => self::ENVIRONMENTS,
+				'warning'      => null,
+				'error'        => null,
+			);
+		}
+
+		if ( ! \is_string( $raw ) ) {
+			return array(
+				'environments' => array(),
+				'warning'      => null,
+				'error'        => \sprintf(
+					'Stała %s musi być stringiem CSV (np. "production" albo "sandbox,production"), a ma typ %s.',
+					self::ENVIRONMENTS_CONSTANT,
+					\gettype( $raw )
+				),
+			);
+		}
+
+		$parsed = self::parse_environment_list( $raw );
+
+		if ( array() === $parsed['valid'] ) {
+			return array(
+				'environments' => array(),
+				'warning'      => null,
+				'error'        => \sprintf(
+					'Stała %s ("%s") nie wskazuje żadnego prawidłowego środowiska. Dozwolone: %s.',
+					self::ENVIRONMENTS_CONSTANT,
+					$raw,
+					\implode( ', ', self::ENVIRONMENTS )
+				),
+			);
+		}
+
+		$warning = array() === $parsed['invalid']
+			? null
+			: \sprintf(
+				'Stała %s zawiera nieznane środowiska (%s) — pomijam. Synchronizuję: %s.',
+				self::ENVIRONMENTS_CONSTANT,
+				\implode( ', ', $parsed['invalid'] ),
+				\implode( ', ', $parsed['valid'] )
+			);
+
+		return array(
+			'environments' => $parsed['valid'],
+			'warning'      => $warning,
+			'error'        => null,
+		);
+	}
+
+	/**
+	 * Czysty parser CSV środowisk (P-6.2c). Rozdziela po przecinku, przycina i
+	 * normalizuje wielkość liter (środowiska to zamknięty, ręcznie wpisywany
+	 * słownik — „Production"/" PRODUCTION " to ergonomiczna literówka, nie inne
+	 * środowisko), pomija puste tokeny (np. z końcowego przecinka), deduplikuje.
+	 * Prawidłowe zwraca w kolejności kanonicznej {@see self::ENVIRONMENTS}
+	 * (produkcja pierwsza, niezależnie od kolejności w CSV); nieznane tokeny
+	 * (rzeczywiste literówki) osobno, w kolejności pierwszego wystąpienia.
+	 *
+	 * @param string $raw Surowa wartość CSV ze stałej.
+	 * @return array{valid:array<int,string>,invalid:array<int,string>}
+	 */
+	public static function parse_environment_list( string $raw ): array {
+		$normalized = array();
+		foreach ( \explode( ',', $raw ) as $token ) {
+			$token = \strtolower( \trim( $token ) );
+			if ( '' !== $token ) {
+				$normalized[] = $token;
+			}
+		}
+		$normalized = \array_values( \array_unique( $normalized ) );
+
+		$valid = array();
+		foreach ( self::ENVIRONMENTS as $environment ) {
+			if ( \in_array( $environment, $normalized, true ) ) {
+				$valid[] = $environment;
+			}
+		}
+
+		return array(
+			'valid'   => $valid,
+			'invalid' => \array_values( \array_diff( $normalized, self::ENVIRONMENTS ) ),
+		);
 	}
 
 	/**
