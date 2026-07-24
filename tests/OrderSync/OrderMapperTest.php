@@ -281,4 +281,72 @@ final class OrderMapperTest extends TestCase {
 		$this->assertNull( OrderMapper::amount( array( 'amount' => 'abc' ) ) );
 		$this->assertNull( OrderMapper::amount( 'nie-tablica' ) );
 	}
+
+	/**
+	 * Buduje minimalne zamówienie z osią `status` i (opcjonalnie) `fulfillment.status`.
+	 *
+	 * @param string      $status      Wartość osi `status`.
+	 * @param string|null $fulfillment Wartość `fulfillment.status` albo null (brak sekcji).
+	 * @return array<string,mixed>
+	 */
+	private function form_with( string $status, ?string $fulfillment ): array {
+		$form = array( 'status' => $status );
+
+		if ( null !== $fulfillment ) {
+			$form['fulfillment'] = array( 'status' => $fulfillment );
+		}
+
+		return $form;
+	}
+
+	public function test_fulfillment_status_extraction(): void {
+		$this->assertSame( 'SENT', OrderMapper::fulfillment_status( $this->form_with( 'READY_FOR_PROCESSING', 'SENT' ) ) );
+		$this->assertSame( '', OrderMapper::fulfillment_status( $this->form_with( 'READY_FOR_PROCESSING', null ) ) );
+		$this->assertSame( '', OrderMapper::fulfillment_status( array( 'fulfillment' => 'nie-tablica' ) ) );
+		$this->assertSame( '', OrderMapper::fulfillment_status( array() ) );
+	}
+
+	/**
+	 * Pełna tabela mapowania obu osi → slug Woo (D-6.5.4).
+	 *
+	 * @dataProvider woo_status_cases
+	 *
+	 * @param string      $status      Oś `status`.
+	 * @param string|null $fulfillment Oś `fulfillment.status`.
+	 * @param string|null $expected    Oczekiwany slug Woo (bez `wc-`) albo null.
+	 * @param string      $message     Opis przypadku.
+	 * @return void
+	 */
+	public function test_woo_status_maps_both_axes( string $status, ?string $fulfillment, ?string $expected, string $message ): void {
+		$this->assertSame( $expected, OrderMapper::woo_status( $this->form_with( $status, $fulfillment ) ), $message );
+	}
+
+	/**
+	 * @return array<string,array{0:string,1:string|null,2:string|null,3:string}>
+	 */
+	public function woo_status_cases(): array {
+		return array(
+			// Próg opłacone/gotowe → processing (tylko przy status = READY_FOR_PROCESSING).
+			'READY + NEW → processing'               => array( 'READY_FOR_PROCESSING', 'NEW', 'processing', 'NEW to jeszcze processing' ),
+			'READY + PROCESSING → processing'        => array( 'READY_FOR_PROCESSING', 'PROCESSING', 'processing', 'w realizacji = processing' ),
+			'READY + READY_FOR_SHIPMENT → processing' => array( 'READY_FOR_PROCESSING', 'READY_FOR_SHIPMENT', 'processing', 'gotowe do wysyłki = wciąż processing' ),
+			// Wysłane / czeka na odbiór → shipped.
+			'READY + SENT → shipped'                 => array( 'READY_FOR_PROCESSING', 'SENT', 'shipped', 'wysłane = shipped' ),
+			'READY + READY_FOR_PICKUP → shipped'     => array( 'READY_FOR_PROCESSING', 'READY_FOR_PICKUP', 'shipped', 'czeka w punkcie (po SENT) = shipped, NIE cofamy' ),
+			// Odebrane → completed.
+			'READY + PICKED_UP → completed'          => array( 'READY_FOR_PROCESSING', 'PICKED_UP', 'completed', 'odebrane = completed' ),
+			// Oś status = CANCELLED ma priorytet nad KAŻDYM fulfillment.
+			'CANCELLED + SENT → cancelled'           => array( 'CANCELLED', 'SENT', 'cancelled', 'status CANCELLED wygrywa z fulfillment SENT' ),
+			'CANCELLED + RETURNED → cancelled'       => array( 'CANCELLED', 'RETURNED', 'cancelled', 'status CANCELLED wygrywa nawet z RETURNED' ),
+			'CANCELLED bez fulfillment → cancelled'  => array( 'CANCELLED', null, 'cancelled', 'sama oś status wystarcza do anulowania' ),
+			// RETURNED poza zakresem (D-6.5.3) → bez zmiany.
+			'READY + RETURNED → null'                => array( 'READY_FOR_PROCESSING', 'RETURNED', null, 'zwrot poza P-6.5 — bez zmiany' ),
+			// Nieznany fulfillment → bez zmiany (nie cofamy na processing).
+			'READY + nieznany → null'                => array( 'READY_FOR_PROCESSING', 'BRAND_NEW_ALLEGRO_STATE', null, 'nieznana wartość nie mapuje na processing' ),
+			// Fulfillment „processing-owy", ale status NIE-READY → brak progu → bez zmiany.
+			'BOUGHT + NEW → null'                    => array( 'BOUGHT', 'NEW', null, 'brak progu opłacone → nie tworzymy processing' ),
+			// Brak sekcji fulfillment przy nie-CANCELLED → bez zmiany.
+			'READY bez fulfillment → null'           => array( 'READY_FOR_PROCESSING', null, null, 'brak sygnału fulfillment → bez zmiany' ),
+		);
+	}
 }

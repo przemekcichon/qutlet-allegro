@@ -28,6 +28,9 @@ namespace Qutlet\Allegro\OrderSync;
  *   (paczkomat/punkt) — {@see self::pickup_point()} znosi oba.
  * - Autorytatywny status zamówienia to `status` (nie `events[].type`) — próg
  *   tworzenia `WC_Order` gate'uje {@see self::is_ready()} (D-6.3.1).
+ * - Status Woo liczymy z DWÓCH osi (`status` + `fulfillment.status`) w
+ *   {@see self::woo_status()} (D-6.5.4) — oś `status = CANCELLED` ma priorytet,
+ *   nierozpoznany `fulfillment` daje „bez zmiany".
  */
 final class OrderMapper {
 
@@ -36,6 +39,56 @@ final class OrderMapper {
 	 * i gotowe do realizacji. VERBATIM z pola `status` próbki (mapping §8c).
 	 */
 	public const STATUS_READY = 'READY_FOR_PROCESSING';
+
+	/**
+	 * Terminalny status osi `status` (mapping §8c): zamówienie anulowane. Ma
+	 * PRIORYTET nad osią `fulfillment.status` (D-6.5.4). Wartość VERBATIM z enumów
+	 * dokumentacji Allegro (event `BUYER_CANCELLED`/`AUTO_CANCELLED`).
+	 */
+	private const STATUS_CANCELLED = 'CANCELLED';
+
+	/**
+	 * Wartości osi `fulfillment.status` (mapping §8c, enumy z dokumentacji Allegro)
+	 * mające odwzorowanie w Woo (D-6.5.4). VERBATIM, case-sensitive.
+	 */
+	private const FULFILLMENT_NEW               = 'NEW';
+	private const FULFILLMENT_PROCESSING        = 'PROCESSING';
+	private const FULFILLMENT_READY_FOR_SHIPMENT = 'READY_FOR_SHIPMENT';
+	private const FULFILLMENT_SENT              = 'SENT';
+	private const FULFILLMENT_READY_FOR_PICKUP  = 'READY_FOR_PICKUP';
+	private const FULFILLMENT_PICKED_UP         = 'PICKED_UP';
+
+	/**
+	 * `fulfillment.status = RETURNED` — zwrot; POZA zakresem P-6.5 (D-6.5.3): zmienia
+	 * się automatycznie i żyje na osobnych endpointach (`/order/customer-returns`,
+	 * `/payments/refunds`). {@see self::woo_status()} zwraca dla niego `null` (log +
+	 * skip po stronie wołającego); stała nazwana, by odróżnić go od wartości NIEZNANEJ.
+	 */
+	public const FULFILLMENT_RETURNED = 'RETURNED';
+
+	/**
+	 * `fulfillment.status = CANCELLED` — udokumentowana wartość osi realizacji (§8c),
+	 * ale anulowanie łapie oś PRIORYTETOWA `status = CANCELLED` (D-6.5.4), więc na osi
+	 * fulfillment mapuje się na „bez zmiany" (`null`). Stała nazwana, by wołający NIE
+	 * mylił jej z wartością NIEZNANĄ (rozróżnienie w logu — {@see OrderWriter::note_unmapped_status()}).
+	 */
+	public const FULFILLMENT_CANCELLED = 'CANCELLED';
+
+	/**
+	 * Docelowe slugi statusów `WC_Order` BEZ prefiksu `wc-` (forma, jaką zwraca
+	 * `WC_Order::get_status()` i przyjmuje `set_status()` — prefiks normalizuje sam
+	 * Woo). VERBATIM z instalacji WooCommerce oraz kontraktu §12.5:
+	 * - `wc-processing`/`wc-completed`/`wc-cancelled` = natywne statusy Woo;
+	 * - `wc-shipped` (unprefixed `shipped`) = własny status rejestrowany przez
+	 *   `qutlet-core` ({@see \Qutlet\Core\OrderSync\OrderStatuses::STATUS_UNPREFIXED},
+	 *   D-6.5.5). Powtórzony tu jako literał (nie referencja do core), bo `OrderMapper`
+	 *   to czysta klasa testowana bez autoloadera core — jedno źródło literału to
+	 *   kontrakt §12.5, cytowany po obu stronach.
+	 */
+	public const WC_PROCESSING = 'processing';
+	public const WC_SHIPPED    = 'shipped';
+	public const WC_COMPLETED  = 'completed';
+	public const WC_CANCELLED  = 'cancelled';
 
 	/**
 	 * Czy zamówienie jest opłacone i gotowe do realizacji (D-6.3.1 — próg tworzenia
@@ -47,6 +100,70 @@ final class OrderMapper {
 	 */
 	public static function is_ready( array $form ): bool {
 		return self::STATUS_READY === self::str( $form['status'] ?? null );
+	}
+
+	/**
+	 * Wartość osi realizacji `fulfillment.status` (mapping §8c) — pusty string, gdy
+	 * brak (np. wariant zdarzenia bez sekcji `fulfillment`). Odczyt VERBATIM.
+	 *
+	 * @param array<string,mixed> $form Pełna zwrotka `GET /order/checkout-forms/{id}`.
+	 * @return string
+	 */
+	public static function fulfillment_status( array $form ): string {
+		$fulfillment = is_array( $form['fulfillment'] ?? null ) ? $form['fulfillment'] : array();
+
+		return self::str( $fulfillment['status'] ?? null );
+	}
+
+	/**
+	 * Kolaps DWÓCH osi stanu Allegro (`status` + `fulfillment.status`) na JEDEN slug
+	 * statusu `WC_Order` (BEZ prefiksu `wc-`, D-6.5.4). Czysta funkcja — pełny kontrakt
+	 * mapowania w jednym miejscu, testowany PHPUnitem bez WordPressa.
+	 *
+	 * Reguła (priorytet z góry na dół):
+	 * 1. `status = CANCELLED` → `cancelled` — oś `status` jest TERMINALNA i ma
+	 *    priorytet nad `fulfillment` (anulowanie wygrywa z każdą realizacją).
+	 * 2. `fulfillment = SENT`/`READY_FOR_PICKUP` → `shipped` — wysłane / czeka na
+	 *    odbiór. `READY_FOR_PICKUP` jest PO `SENT` w cyklu paczkomatu
+	 *    (`SENT → READY_FOR_PICKUP → PICKED_UP`), więc mapowanie na `processing`
+	 *    cofnęłoby status — oba = „wysłane".
+	 * 3. `fulfillment = PICKED_UP` → `completed` — odebrane = zrealizowane.
+	 * 4. `fulfillment = NEW`/`PROCESSING`/`READY_FOR_SHIPMENT` → `processing`, ale
+	 *    TYLKO gdy `status = READY_FOR_PROCESSING` (próg opłacone/gotowe, D-6.3.1);
+	 *    inaczej brak mapowania (`null`).
+	 * 5. `fulfillment = RETURNED` (D-6.5.3) oraz KAŻDA nierozpoznana wartość →
+	 *    `null` = „bez zmiany" (Allegro dodaje nowe statusy z czasem; nieznanej
+	 *    wartości NIE mapujemy na `processing`, bo cofnęłaby już-wysłane zamówienie).
+	 *    Wołający loguje `null` wg {@see self::fulfillment_status()} (RETURNED vs nieznane).
+	 *
+	 * @param array<string,mixed> $form Pełna zwrotka `GET /order/checkout-forms/{id}`.
+	 * @return string|null Slug statusu Woo (bez `wc-`) albo `null` = zostaw bieżący.
+	 */
+	public static function woo_status( array $form ): ?string {
+		// (1) Oś `status` terminalna ma priorytet nad `fulfillment` (D-6.5.4).
+		if ( self::STATUS_CANCELLED === self::str( $form['status'] ?? null ) ) {
+			return self::WC_CANCELLED;
+		}
+
+		switch ( self::fulfillment_status( $form ) ) {
+			case self::FULFILLMENT_SENT:
+			case self::FULFILLMENT_READY_FOR_PICKUP:
+				return self::WC_SHIPPED;
+
+			case self::FULFILLMENT_PICKED_UP:
+				return self::WC_COMPLETED;
+
+			case self::FULFILLMENT_NEW:
+			case self::FULFILLMENT_PROCESSING:
+			case self::FULFILLMENT_READY_FOR_SHIPMENT:
+				// Próg tworzenia/opłacone: `processing` tylko przy autorytatywnym
+				// `status = READY_FOR_PROCESSING` (D-6.3.1); inaczej brak zmiany.
+				return self::is_ready( $form ) ? self::WC_PROCESSING : null;
+
+			default:
+				// RETURNED (poza zakresem, D-6.5.3) i wartości nieznane: bez zmiany.
+				return null;
+		}
 	}
 
 	/**

@@ -26,14 +26,25 @@ use WC_Product;
  * Strumień `order/events` powtarza to samo zamówienie wielokrotnie (§8d), a kursor
  * przesuwa się dopiero po przetworzeniu całości — więc TEN SAM formularz może wejść
  * tu ponownie. Kluczem powiązania jest indeksowana meta
- * `_qutlet_allegro_checkout_form_id` (kontrakt §12.1):
- * - brak zamówienia → tworzymy;
- * - istnieje, `revision` bez zmian → NO-OP (ponowione zdarzenie);
- * - istnieje, `revision` inny → treść się zmieniła (§8e) → PRZEBUDOWA (usuwamy
- *   pozycje Allegro i zapisujemy je od nowa z autorytatywnej treści checkout-form);
+ * `_qutlet_allegro_checkout_form_id` (kontrakt §12.1). Upsert godzi DWIE NIEZALEŻNE
+ * osie (D-6.5.7): TREŚĆ zamówienia (pozycje/adresy/suma — sterowana `revision`) oraz
+ * STATUS realizacji (`fulfillment.status`, który `revision` NIE bumpuje):
+ * - brak zamówienia + `status = READY_FOR_PROCESSING` → tworzymy (próg D-6.3.1);
+ * - brak zamówienia + tylko tranzycja (SENT/CANCELLED/…) → SKIP: nie tworzymy
+ *   zamówień z połowy cyklu życia (P-6.5c);
+ * - istnieje: TREŚĆ przebudowujemy tylko przy zmianie `revision` (usuwamy pozycje
+ *   Allegro i zapisujemy od nowa z autorytatywnej treści), a STATUS ustawiamy, gdy
+ *   docelowy z {@see OrderMapper::woo_status()} różni się od bieżącego — NIEZALEŻNIE
+ *   od `revision` (D-6.5.7: NO-OP po samej rewizji przełknąłby tranzycję wysyłki);
+ * - `revision` i status bez zmian → NO-OP (ponowione zdarzenie);
  * - istnieje w KOSZU → wycofane ręcznie przez człowieka: NIE ruszamy i NIE
  *   odtwarzamy (analogicznie do produktu w koszu, D-6.2.1 — „nie psujemy świadomej
  *   decyzji operatora"). Zgłaszane w podsumowaniu do potwierdzenia jako reguła.
+ *
+ * ## Kierunek = tylko pull (D-6.5.1)
+ * Zapisujemy WYŁĄCZNIE do Woo; zero żądań zapisu do Allegro (slot `read`). Allegro
+ * jest źródłem prawdy statusu — pull nadpisuje ręczną zmianę w adminie (D-6.5.2),
+ * kosz pozostaje jedynym wyjątkiem „nie ruszamy".
  *
  * ## Granice zapisu i PII (D-6.3.5 / §8g)
  * Zapisujemy tylko zakres funkcjonalny: billing z `buyer`, shipping z `delivery`,
@@ -92,22 +103,15 @@ final class OrderWriter {
 	private const CREATED_VIA = 'allegro';
 
 	/**
-	 * Status `WC_Order` dla opłaconego zamówienia gotowego do realizacji (D-6.3.1 /
-	 * mapping §8c: `READY_FOR_PROCESSING` → `wc-processing`). Bez prefiksu `wc-` —
-	 * `set_status()` normalizuje.
-	 */
-	private const STATUS_PROCESSING = 'processing';
-
-	/**
-	 * Id transakcyjnych e-maili WooCommerce wyłączanych na czas zapisu. Utworzenie
-	 * zamówienia jako `wc-processing` odpala tranzycję `pending → processing`, na
-	 * której WooCommerce wysyła `new_order` (do admina) i `customer_processing_order`
-	 * (do KUPUJĄCEGO). To zamówienia z Allegro — kupujący dostał już powiadomienia
-	 * Allegro, a mail z NASZEGO sklepu byłby działaniem na zewnątrz do realnej osoby;
-	 * w dodatku kontakt marketingowy/transakcyjny do kupujących Allegro to odrębny,
-	 * warunkowy i prawnie bramkowany punkt (P-6.4), którego ten import NIE otwiera.
-	 * Zbiór szerszy niż sam próg `processing` — defensywnie gasi też pozostałe maile
-	 * zamówień na wypadek innej tranzycji w przyszłości.
+	 * Id transakcyjnych e-maili WooCommerce wyłączanych na czas zapisu. Każda
+	 * tranzycja statusu odpalana przez `save()` (utworzenie `pending → processing`,
+	 * pull statusu `processing → shipped`/`completed`/`cancelled`) wysyła maile Woo:
+	 * `new_order` (admin) oraz `customer_*_order` (do KUPUJĄCEGO). To zamówienia z
+	 * Allegro — kupujący dostał już powiadomienia Allegro, a mail z NASZEGO sklepu
+	 * byłby działaniem na zewnątrz do realnej osoby; kontakt do kupujących Allegro to
+	 * odrębny, warunkowy i prawnie bramkowany punkt (P-6.4), którego pull NIE otwiera.
+	 * Zbiór pokrywa wszystkie tranzycje mapowane w P-6.5c (D-6.5.4) i defensywnie
+	 * pozostałe maile zamówień.
 	 *
 	 * @var array<int,string>
 	 */
@@ -125,8 +129,10 @@ final class OrderWriter {
 
 	/**
 	 * Tworzy/aktualizuje `WC_Order` z pełnej zwrotki zamówienia (idempotentnie po
-	 * `checkoutForm.id`). Wywoływane WYŁĄCZNIE dla zamówień o autorytatywnym
-	 * `status = READY_FOR_PROCESSING` (bramkuje {@see SyncOrdersCommand}).
+	 * `checkoutForm.id`), godząc oś TREŚCI (rewizja) i oś STATUSU
+	 * ({@see OrderMapper::woo_status()}) niezależnie (D-6.5.7). Wołane dla zdarzeń
+	 * `READY_FOR_PROCESSING` (tworzenie/treść) ORAZ tranzycji fulfillmentu/anulowania
+	 * (`FULFILLMENT_STATUS_CHANGED`/`BUYER_CANCELLED`/`AUTO_CANCELLED`) i toru `--full`.
 	 *
 	 * @param array<string,mixed> $form Zdekodowana zwrotka `GET /order/checkout-forms/{id}`.
 	 * @return array{action:string,order_id:int,warnings:array<int,string>}
@@ -143,64 +149,116 @@ final class OrderWriter {
 			);
 		}
 
-		$existing_id = $this->find_order_id( $checkout_form_id, $warnings );
-		$order       = null;
-		$action      = 'created';
+		$target_status = OrderMapper::woo_status( $form );
+		$existing_id   = $this->find_order_id( $checkout_form_id, $warnings );
 
-		if ( null !== $existing_id ) {
-			$order = wc_get_order( $existing_id );
-
-			if ( ! $order instanceof WC_Order ) {
+		// --- Brak istniejącego zamówienia ---
+		if ( null === $existing_id ) {
+			// Tworzymy TYLKO dla progu opłacone/gotowe (D-6.3.1). Sama tranzycja
+			// (SENT/CANCELLED/…) bez zaimportowanego zamówienia → skip: nie tworzymy
+			// zamówień z połowy cyklu życia (P-6.5c).
+			if ( ! OrderMapper::is_ready( $form ) ) {
 				return array(
-					'action'   => 'failed',
-					'order_id' => $existing_id,
-					'warnings' => array_merge( $warnings, array( sprintf( 'Zamówienie %d nie jest obiektem WC_Order — pomijam.', $existing_id ) ) ),
-				);
-			}
-
-			// Kosz = świadome wycofanie przez człowieka (analogia D-6.2.1) — zero
-			// zapisów, żadnego odtwarzania.
-			if ( 'trash' === $order->get_status() ) {
-				return array(
-					'action'   => 'skipped-trashed',
-					'order_id' => $existing_id,
+					'action'   => 'skipped-no-order',
+					'order_id' => 0,
 					'warnings' => $warnings,
 				);
 			}
 
-			$incoming_revision = OrderMapper::revision( $form );
-			$stored_revision   = (string) $order->get_meta( self::META_REVISION );
-
-			// Ta sama rewizja = ponowione zdarzenie z tą samą treścią → NO-OP.
-			if ( '' !== $incoming_revision && $incoming_revision === $stored_revision ) {
-				return array(
-					'action'   => 'unchanged',
-					'order_id' => $existing_id,
-					'warnings' => $warnings,
-				);
-			}
-
-			// Rewizja inna (treść się zmieniła) — przebudowa pozycji od zera, żeby
-			// aktualizacja nie duplikowała pozycji istniejącego zamówienia.
-			$this->remove_allegro_items( $order );
-			$action = 'updated';
-		} else {
 			$order = new WC_Order();
+			$this->apply( $order, $form, $warnings );
+			// Nowe zamówienie READY: status z mappera; przy nierozpoznanym
+			// `fulfillment` domyślny próg `processing` (zamówienie jest opłacone).
+			$order->set_status( null !== $target_status ? $target_status : OrderMapper::WC_PROCESSING );
+			$this->save_order( $order );
+
+			return array(
+				'action'   => 'created',
+				'order_id' => $order->get_id(),
+				'warnings' => $warnings,
+			);
 		}
 
-		$this->apply( $order, $form, $warnings );
+		// --- Istniejące zamówienie ---
+		$order = wc_get_order( $existing_id );
 
-		// Zapis odpala tranzycję statusu (`pending → processing`) z dwoma skutkami
-		// ubocznymi Woo, których import NIE może wywołać — gasimy oba NA CZAS zapisu
-		// (filtry, potem zdejmowane, żeby globalny stan wrócił do normy):
-		//  1) maile do kupującego i admina — outward-facing do realnej osoby, poza
-		//     zakresem importu (D-6.3.5 / P-6.4);
-		//  2) automatyczne zdjęcie stanu magazynowego produktu. Stan produktów z
-		//     Allegro jest OWNED przez pull `sync-stock` (D-6.G3), nie przez lokalną
-		//     sprzedaż. Co gorsza, Woo `woocommerce_reduce_order_item_stock` mostkuje
-		//     się w core na akcję, którą `StockPushListener` PUSHUJE do Allegro — a
-		//     to sprzedaż, która stan na Allegro już zdjęła: bez tej blokady import
-		//     zdejmowałby go po raz drugi (podwójne dekrementowanie + pętla zwrotna).
+		if ( ! $order instanceof WC_Order ) {
+			return array(
+				'action'   => 'failed',
+				'order_id' => $existing_id,
+				'warnings' => array_merge( $warnings, array( sprintf( 'Zamówienie %d nie jest obiektem WC_Order — pomijam.', $existing_id ) ) ),
+			);
+		}
+
+		// Kosz = świadome wycofanie przez człowieka (analogia D-6.2.1) — zero
+		// zapisów, żadnego odtwarzania (jedyny wyjątek od D-6.5.2).
+		if ( 'trash' === $order->get_status() ) {
+			return array(
+				'action'   => 'skipped-trashed',
+				'order_id' => $existing_id,
+				'warnings' => $warnings,
+			);
+		}
+
+		// Oś TREŚCI (rewizja): zmiana `revision` = treść zamówienia się zmieniła (§8e).
+		$incoming_revision = OrderMapper::revision( $form );
+		$stored_revision   = (string) $order->get_meta( self::META_REVISION );
+		$content_changed   = '' !== $incoming_revision && $incoming_revision !== $stored_revision;
+
+		// Oś STATUSU: liczona z mappingu, stosowana NIEZALEŻNIE od rewizji (D-6.5.7 —
+		// zmiana fulfillmentu NIE bumpuje `revision`, więc NO-OP po samej rewizji
+		// przełknąłby tranzycję wysyłki). `null` = brak mapowania (RETURNED/nieznane)
+		// → zostaw bieżący status + log (rozróżnienie w {@see self::note_unmapped_status()}).
+		$status_changed = null !== $target_status && $target_status !== $order->get_status();
+
+		if ( null === $target_status ) {
+			$this->note_unmapped_status( $form, $warnings );
+		}
+
+		if ( ! $content_changed && ! $status_changed ) {
+			return array(
+				'action'   => 'unchanged',
+				'order_id' => $existing_id,
+				'warnings' => $warnings,
+			);
+		}
+
+		if ( $content_changed ) {
+			// Przebudowa pozycji od zera, żeby ponowny zapis nie duplikował pozycji.
+			$this->remove_allegro_items( $order );
+			$this->apply( $order, $form, $warnings );
+		}
+
+		if ( $status_changed ) {
+			$order->set_status( $target_status );
+		}
+
+		$this->save_order( $order );
+
+		return array(
+			'action'   => $content_changed ? 'updated' : 'status-updated',
+			'order_id' => $order->get_id(),
+			'warnings' => $warnings,
+		);
+	}
+
+	/**
+	 * Zapisuje `WC_Order`, gasząc na CZAS zapisu dwa skutki uboczne Woo, których pull
+	 * NIE może wywołać (filtry zdejmowane w `finally`, żeby globalny stan wrócił do
+	 * normy):
+	 *  1) maile transakcyjne ({@see self::SUPPRESSED_EMAILS}) — outward-facing do
+	 *     realnej osoby, poza zakresem (D-6.3.5 / P-6.4). Dotyczy KAŻDEJ tranzycji
+	 *     statusu (utworzenie i pull SENT/PICKED_UP/CANCELLED — D-6.5.4);
+	 *  2) automatyczne zdjęcie stanu magazynowego. Stan produktów z Allegro jest
+	 *     OWNED przez pull `sync-stock` (D-6.G3), nie przez lokalną sprzedaż; Woo
+	 *     `woocommerce_reduce_order_item_stock` mostkuje się w core na akcję, którą
+	 *     `StockPushListener` PUSHUJE do Allegro — bez tej blokady zapis zdejmowałby
+	 *     stan po raz drugi (podwójne dekrementowanie + pętla zwrotna).
+	 *
+	 * @param WC_Order $order Zamówienie do zapisania.
+	 * @return void
+	 */
+	private function save_order( WC_Order $order ): void {
 		$this->suppress_transactional_emails();
 		add_filter( 'woocommerce_can_reduce_order_stock', '__return_false', 999 );
 
@@ -210,12 +268,39 @@ final class OrderWriter {
 			remove_filter( 'woocommerce_can_reduce_order_stock', '__return_false', 999 );
 			$this->restore_transactional_emails();
 		}
+	}
 
-		return array(
-			'action'   => $action,
-			'order_id' => $order->get_id(),
-			'warnings' => $warnings,
-		);
+	/**
+	 * Dokłada ostrzeżenie, gdy {@see OrderMapper::woo_status()} nie dał mapowania
+	 * (`null`) dla istniejącego zamówienia — rozróżniając trzy przypadki: zwrot
+	 * (D-6.5.3, poza zakresem P-6.5), udokumentowany `fulfillment = CANCELLED`
+	 * (anulowanie łapie oś priorytetowa `status`, D-6.5.4) oraz wartość NIEROZPOZNANĄ
+	 * (Allegro dodaje statusy z czasem). Pusty `fulfillment` (brak sygnału) → cicho.
+	 *
+	 * @param array<string,mixed> $form     Pełna zwrotka zamówienia.
+	 * @param array<int,string>   $warnings Akumulator ostrzeżeń (przez referencję).
+	 * @return void
+	 */
+	private function note_unmapped_status( array $form, array &$warnings ): void {
+		$fulfillment = OrderMapper::fulfillment_status( $form );
+
+		if ( OrderMapper::FULFILLMENT_RETURNED === $fulfillment ) {
+			$warnings[] = 'fulfillment.status=RETURNED — zwrot poza zakresem P-6.5 (D-6.5.3): status bez zmiany, obsłuży osobny punkt.';
+
+			return;
+		}
+
+		if ( OrderMapper::FULFILLMENT_CANCELLED === $fulfillment ) {
+			// Udokumentowany enum — nie „nieznany". Anulowanie rozstrzyga oś
+			// PRIORYTETOWA `status = CANCELLED` (D-6.5.4); na osi fulfillment bez zmiany.
+			$warnings[] = 'fulfillment.status=CANCELLED bez status=CANCELLED — anulowanie steruje osią „status" (D-6.5.4): status bez zmiany.';
+
+			return;
+		}
+
+		if ( '' !== $fulfillment ) {
+			$warnings[] = sprintf( 'Nierozpoznany fulfillment.status=„%s" — status bez zmiany (D-6.5.4); Allegro mogło dodać nowy status realizacji.', $fulfillment );
+		}
 	}
 
 	/**
@@ -260,8 +345,8 @@ final class OrderWriter {
 			$order->set_total( $this->money( $total ) );
 		}
 
-		$order->set_status( self::STATUS_PROCESSING );
-
+		// UWAGA: status ustawia {@see self::upsert()} (oś statusu niezależna od treści,
+		// D-6.5.7) — `apply()` buduje wyłącznie treść i meta.
 		$this->apply_meta( $order, $form );
 	}
 
