@@ -316,6 +316,17 @@ final class SyncStockCommand {
 	 * dla ofert, których dotyczyły. Kursor przesuwa się DOPIERO po przetworzeniu
 	 * całości (przerwany przebieg powtórzy pracę — pull jest idempotentny).
 	 *
+	 * Brak kursora (pierwszy przebieg dla środowiska) NIE jest specjalnym
+	 * przypadkiem „tylko ustaw kursor" — paginacja zaczyna się po prostu od
+	 * początku dostępnej retencji API (`$from` pusty na pierwszej stronie) i
+	 * WSZYSTKIE napotkane zdarzenia są przetwarzane identycznie jak w kolejnych
+	 * przebiegach. Poprawka po sesji 2026-07-24 (realny przebieg na sandboksie):
+	 * dawna wersja przy pierwszym uruchomieniu ustawiała kursor NA pierwszym
+	 * napotkanym zdarzeniu bez przetworzenia go — jeśli akurat WTEDY istniało już
+	 * realne zdarzenie (np. sprzedaż), znikało ono cicho, dopóki nie dociągnął go
+	 * `--full`. Ryzyko „replay lat historii" przy prawdziwie pierwszej aktywacji
+	 * ogranicza retencja API zdarzeń + bezpiecznik paginacji ({@see self::MAX_PAGES}).
+	 *
 	 * @param string $environment Środowisko.
 	 * @param string $api         Baza REST API.
 	 * @param string $access      Access token slotu `read`.
@@ -325,24 +336,18 @@ final class SyncStockCommand {
 		$option = self::OPTION_CURSOR_PREFIX . $environment;
 		$cursor = (string) get_option( $option, '' );
 
-		if ( '' === $cursor ) {
-			return $this->seed_cursor( $environment, $api, $access );
-		}
-
 		$offer_ids = array();
 		$last_id   = '';
 		$from      = $cursor;
 
 		for ( $page = 0; $page < self::MAX_PAGES; $page++ ) {
-			$resp = $this->get(
-				$api . '/order/events?' . http_build_query(
-					array(
-						'limit' => self::EVENT_PAGE_LIMIT,
-						'from'  => $from,
-					)
-				),
-				$access
-			);
+			$query = array( 'limit' => self::EVENT_PAGE_LIMIT );
+
+			if ( '' !== $from ) {
+				$query['from'] = $from;
+			}
+
+			$resp = $this->get( $api . '/order/events?' . http_build_query( $query ), $access );
 
 			if ( 429 === $resp['status'] ) {
 				WP_CLI::warning( 'HTTP 429 na order/events — przerywam przebieg bez przesuwania kursora (backoff = kadencja crona, D-6.G2).' );
@@ -384,13 +389,30 @@ final class SyncStockCommand {
 			}
 		}
 
-		if ( array() === $offer_ids ) {
-			WP_CLI::log( 'Brak nowych zdarzeń — stany bez zmian.' );
+		if ( '' === $last_id ) {
+			// Strumień naprawdę pusty (nowe konto/świeży sandbox) — kursor NIE jest
+			// ustawiany: przy pierwszym realnym zdarzeniu ten sam kod wejdzie tu z
+			// tym samym pustym `$cursor` i je przetworzy (nie zgubi go).
+			WP_CLI::log( 'Strumień zdarzeń pusty — kursor zainicjuje się przy pierwszym zdarzeniu.' );
 
 			return null;
 		}
 
-		WP_CLI::log( sprintf( 'Zdarzenia wskazują %d ofert do odświeżenia.', count( $offer_ids ) ) );
+		if ( array() === $offer_ids ) {
+			// Zdarzenia BYŁY (kursor musi ruszyć — inaczej czytalibyśmy ten sam
+			// odcinek w kółko), ale żadne nie niosło `offer.id` (typy zdarzeń bez
+			// `lineItems`). Nic do odświeżenia.
+			WP_CLI::log( 'Brak nowych zdarzeń — stany bez zmian.' );
+			update_option( $option, $last_id, false );
+
+			return null;
+		}
+
+		if ( '' === $cursor ) {
+			WP_CLI::log( sprintf( 'Pierwszy przebieg (%s): %d ofert z dostępnej historii zdarzeń do odświeżenia.', $environment, count( $offer_ids ) ) );
+		} else {
+			WP_CLI::log( sprintf( 'Zdarzenia wskazują %d ofert do odświeżenia.', count( $offer_ids ) ) );
+		}
 
 		foreach ( array_keys( $offer_ids ) as $offer_id ) {
 			$status = $this->pull_offer( $environment, $api, $access, (string) $offer_id );
@@ -403,78 +425,6 @@ final class SyncStockCommand {
 		}
 
 		update_option( $option, $last_id, false );
-
-		return null;
-	}
-
-	/**
-	 * Pierwsze uruchomienie: bez kursora nie wiadomo, które zdarzenia są „nowe" —
-	 * NIE przetwarzamy historii, tylko ustawiamy kursor na koniec strumienia.
-	 * Zaległości względem historii wyrównuje `--full` (rekoncyliacja).
-	 *
-	 * @param string $environment Środowisko.
-	 * @param string $api         Baza REST API.
-	 * @param string $access      Access token slotu `read`.
-	 * @return string|null Błąd fatalny albo null.
-	 */
-	private function seed_cursor( string $environment, string $api, string $access ): ?string {
-		$last_id = '';
-		$from    = '';
-
-		for ( $page = 0; $page < self::MAX_PAGES; $page++ ) {
-			$query = array( 'limit' => self::EVENT_PAGE_LIMIT );
-
-			if ( '' !== $from ) {
-				$query['from'] = $from;
-			}
-
-			$resp = $this->get( $api . '/order/events?' . http_build_query( $query ), $access );
-
-			if ( 429 === $resp['status'] ) {
-				WP_CLI::warning( 'HTTP 429 przy inicjalizacji kursora — następny przebieg ponowi.' );
-
-				return null;
-			}
-
-			if ( 200 !== $resp['status'] || ! is_array( $resp['data'] ) ) {
-				return sprintf( 'GET /order/events (inicjalizacja kursora) → HTTP %d %s.', $resp['status'], $this->error_detail( $resp ) );
-			}
-
-			$events = isset( $resp['data']['events'] ) && is_array( $resp['data']['events'] )
-				? array_values( $resp['data']['events'] )
-				: array();
-
-			if ( array() === $events ) {
-				break;
-			}
-
-			$page_last = self::last_event_id( $events );
-
-			if ( '' === $page_last ) {
-				break;
-			}
-
-			$last_id = $page_last;
-			$from    = $page_last;
-
-			if ( count( $events ) < self::EVENT_PAGE_LIMIT ) {
-				break;
-			}
-		}
-
-		if ( '' === $last_id ) {
-			WP_CLI::log( 'Strumień zdarzeń pusty — kursor zainicjuje się przy pierwszym zdarzeniu.' );
-
-			return null;
-		}
-
-		update_option( self::OPTION_CURSOR_PREFIX . $environment, $last_id, false );
-		WP_CLI::log(
-			sprintf(
-				'Kursor zdarzeń zainicjowany na %s — historia sprzed inicjalizacji pominięta; stan wyrówna `sync-stock --full`.',
-				$last_id
-			)
-		);
 
 		return null;
 	}
