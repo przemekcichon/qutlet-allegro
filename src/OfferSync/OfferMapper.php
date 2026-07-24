@@ -178,6 +178,27 @@ final class OfferMapper {
 	}
 
 	/**
+	 * Środowisko POCHODZENIA produktu wyprowadzone z zapisanego `allegro_url`
+	 * (odwrotność {@see self::offer_url()}) — D-6.2.2: push/pull stanu wolno
+	 * kierować tylko do środowiska, z którego produkt został zaimportowany.
+	 * Prefiksy są jednoznaczne (baza produkcyjna kończy się `pl/oferta/`,
+	 * sandboxowa `allegrosandbox.pl/oferta/` — żaden nie jest prefiksem drugiego).
+	 *
+	 * @param string $url Zapisany `allegro_url` produktu.
+	 * @return string|null Stała `Environment::*` albo null (URL nierozpoznany /
+	 *                     produkt nie pochodzi z importu).
+	 */
+	public static function environment_from_offer_url( string $url ): ?string {
+		foreach ( self::OFFER_URL_BASE as $environment => $base ) {
+			if ( 0 === strpos( $url, $base ) ) {
+				return $environment;
+			}
+		}
+
+		return null;
+	}
+
+	/**
 	 * Lista URL-i zdjęć oferty — `images[]` to tablica GOŁYCH stringów-URL-i
 	 * (zweryfikowane w realnej zwrotce; na liście ofert jest inaczej — obiekty).
 	 *

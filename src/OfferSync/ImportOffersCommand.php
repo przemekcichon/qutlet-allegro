@@ -286,6 +286,11 @@ final class ImportOffersCommand {
 				++$created;
 			} elseif ( 'updated' === $result['action'] ) {
 				++$updated;
+			} elseif ( 'skipped-trashed' === $result['action'] ) {
+				// Produkt w koszu = świadomie wycofany przez kuratora (D-6.2.1):
+				// import pomija i loguje — NIGDY nie tworzy od nowa.
+				++$skipped;
+				WP_CLI::log( sprintf( '  %s pominięta: powiązany produkt %d w koszu (wycofany, D-6.2.1).', $offer_id, $result['product_id'] ) );
 			} else {
 				++$failed;
 			}

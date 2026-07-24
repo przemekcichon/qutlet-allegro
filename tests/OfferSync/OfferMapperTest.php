@@ -293,4 +293,61 @@ final class OfferMapperTest extends TestCase {
 
 		$this->assertNull( OfferMapper::stock_quantity( $offer ) );
 	}
+
+	/**
+	 * P-6.2b: mapper działa też na kształcie `/parts` (mapping §5 — te same
+	 * klucze `stock.available` i `sellingMode.price.amount`, w tym wariant
+	 * `price: null` dla oferty bez ceny — z realnej próbki
+	 * `GET_sale-product-offers-parts.json`).
+	 */
+	public function test_parts_shape_yields_stock_and_price(): void {
+		$parts = array(
+			'id'          => '18780385602',
+			'stock'       => array( 'available' => 1 ),
+			'sellingMode' => array(
+				'price' => array(
+					'amount'   => '179.00',
+					'currency' => 'PLN',
+				),
+			),
+		);
+
+		$this->assertSame( 1, OfferMapper::stock_quantity( $parts ) );
+		$this->assertSame( 179.0, OfferMapper::price_amount( $parts ) );
+
+		$sold_out = array(
+			'id'          => '18757279235',
+			'stock'       => array( 'available' => 0 ),
+			'sellingMode' => array( 'price' => null ),
+		);
+
+		$this->assertSame( 0, OfferMapper::stock_quantity( $sold_out ) );
+		$this->assertNull( OfferMapper::price_amount( $sold_out ) );
+	}
+
+	/**
+	 * P-6.2b (D-6.2.2): pochodzenie środowiska z zapisanego `allegro_url` —
+	 * odwrotność `offer_url()`, spójna w obie strony dla obu środowisk; URL
+	 * spoza obu baz (produkt ręczny / brak importu) daje null, nigdy zgadywanie.
+	 */
+	public function test_environment_from_offer_url_roundtrip_and_unknown(): void {
+		$this->assertSame(
+			Environment::PRODUCTION,
+			OfferMapper::environment_from_offer_url( OfferMapper::offer_url( Environment::PRODUCTION, '18780385602' ) )
+		);
+		$this->assertSame(
+			Environment::SANDBOX,
+			OfferMapper::environment_from_offer_url( OfferMapper::offer_url( Environment::SANDBOX, '18780385602' ) )
+		);
+
+		// Baza sandboxowa zaczyna się jak produkcyjna domena + kropka — prefiksy
+		// nie mogą się mylić w żadną stronę.
+		$this->assertSame(
+			Environment::SANDBOX,
+			OfferMapper::environment_from_offer_url( 'https://allegro.pl.allegrosandbox.pl/oferta/123' )
+		);
+
+		$this->assertNull( OfferMapper::environment_from_offer_url( '' ) );
+		$this->assertNull( OfferMapper::environment_from_offer_url( 'https://example.com/oferta/123' ) );
+	}
 }
