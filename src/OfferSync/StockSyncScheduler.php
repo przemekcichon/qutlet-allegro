@@ -29,9 +29,11 @@ use WP_CLI;
  *
  * Wzorzec identyczny z {@see \Qutlet\Allegro\Auth\RefreshScheduler}: self-healing
  * zaplanowanie na `init`, `wp_clear_scheduled_hook` przy dezaktywacji. Dwa zdarzenia:
- * przyrostowe (~2 min, {@see self::CRON_HOOK}) i pełna rekoncyliacja (raz dziennie
- * w nocy, {@see self::CRON_HOOK_FULL} — zmierzone: `--full` na 555 ofertach trwa
- * pojedyncze sekundy, w przeciwieństwie do pełnego importu P-6.1b).
+ * przyrostowe (~2 min, {@see self::CRON_HOOK}) i pełna rekoncyliacja (~30 min,
+ * {@see self::CRON_HOOK_FULL} — zmierzone na realnym sandboksie: `--full` na
+ * 555 ofertach trwa pojedyncze sekundy, w przeciwieństwie do pełnego importu
+ * P-6.1b; użytkownik wybrał 30 min zamiast pierwotnie rozważanej nocnej kadencji
+ * właśnie dzięki tej niskiej cenie przebiegu).
  *
  * ## Dlaczego `WP_CLI::runcommand()`, nie bezpośrednie wywołanie `SyncStockCommand`
  * `wp cron event run --due-now` to pełny proces WP-CLI, więc `WP_CLI::error()`
@@ -58,7 +60,7 @@ final class StockSyncScheduler {
 	public const CRON_HOOK_FULL = 'qutlet_allegro_sync_stock_full';
 
 	/**
-	 * Identyfikator własnego harmonogramu (filtr `cron_schedules`).
+	 * Identyfikator własnego harmonogramu przyrostowego (filtr `cron_schedules`).
 	 */
 	private const SCHEDULE_INCREMENTAL = 'qutlet_allegro_two_minutes';
 
@@ -68,16 +70,17 @@ final class StockSyncScheduler {
 	private const INTERVAL_SECONDS = 2 * MINUTE_IN_SECONDS;
 
 	/**
-	 * Rekoncyliacja pełna: wbudowany harmonogram WP „daily" wystarcza (zmierzone
-	 * — przebieg trwa pojedyncze sekundy, nie potrzeba częstszej kadencji).
+	 * Identyfikator własnego harmonogramu pełnej rekoncyliacji (filtr
+	 * `cron_schedules` — wbudowane kończą się na `daily`, potrzebujemy częściej).
 	 */
-	private const RECURRENCE_FULL = 'daily';
+	private const SCHEDULE_FULL = 'qutlet_allegro_thirty_minutes';
 
 	/**
-	 * Godzina (czas serwera) pierwszego uruchomienia pełnej rekoncyliacji — poza
-	 * godzinami szczytu sklepu. Kolejne przebiegi „daily" liczą się od tego czasu.
+	 * Kadencja pełnej rekoncyliacji w sekundach — decyzja użytkownika (sesja
+	 * 2026-07-24) po zmierzeniu realnego przebiegu (pojedyncze sekundy na 555
+	 * ofertach): 30 min zamiast pierwotnie rozważanej nocnej kadencji.
 	 */
-	private const NIGHTLY_HOUR = 3;
+	private const INTERVAL_SECONDS_FULL = 30 * MINUTE_IN_SECONDS;
 
 	/**
 	 * Wpina hooki: własny interwał, oba zdarzenia crona i samonaprawialne
@@ -96,8 +99,8 @@ final class StockSyncScheduler {
 	}
 
 	/**
-	 * Dokłada własny interwał ~2 min do harmonogramów WP (wbudowane kończą się na
-	 * `daily`) — filtr `cron_schedules`.
+	 * Dokłada własne interwały (~2 min, ~30 min) do harmonogramów WP (wbudowane
+	 * kończą się na `daily`) — filtr `cron_schedules`.
 	 *
 	 * @param array<string,array{interval:int,display:string}> $schedules Harmonogramy WP.
 	 * @return array<string,array{interval:int,display:string}>
@@ -106,6 +109,11 @@ final class StockSyncScheduler {
 		$schedules[ self::SCHEDULE_INCREMENTAL ] = array(
 			'interval' => self::INTERVAL_SECONDS,
 			'display'  => __( 'Co 2 minuty (qutlet-allegro sync-stock)', 'qutlet-allegro' ),
+		);
+
+		$schedules[ self::SCHEDULE_FULL ] = array(
+			'interval' => self::INTERVAL_SECONDS_FULL,
+			'display'  => __( 'Co 30 minut (qutlet-allegro sync-stock --full)', 'qutlet-allegro' ),
 		);
 
 		return $schedules;
@@ -122,7 +130,7 @@ final class StockSyncScheduler {
 		}
 
 		if ( false === wp_next_scheduled( self::CRON_HOOK_FULL ) ) {
-			wp_schedule_event( self::next_nightly_run(), self::RECURRENCE_FULL, self::CRON_HOOK_FULL );
+			wp_schedule_event( time(), self::SCHEDULE_FULL, self::CRON_HOOK_FULL );
 		}
 	}
 
@@ -169,18 +177,5 @@ final class StockSyncScheduler {
 				'exit_error' => false,
 			)
 		);
-	}
-
-	/**
-	 * Najbliższe wystąpienie {@see self::NIGHTLY_HOUR} (czas serwera) — dziś, jeśli
-	 * jeszcze nie minęła, inaczej jutro. Kolejne przebiegi „daily" liczą się od
-	 * tego pierwszego zaplanowania.
-	 *
-	 * @return int Znacznik czasu (unix).
-	 */
-	private static function next_nightly_run(): int {
-		$today = (int) strtotime( sprintf( 'today %02d:00', self::NIGHTLY_HOUR ) );
-
-		return $today > time() ? $today : (int) strtotime( sprintf( 'tomorrow %02d:00', self::NIGHTLY_HOUR ) );
 	}
 }
