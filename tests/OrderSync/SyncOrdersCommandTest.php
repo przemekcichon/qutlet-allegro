@@ -13,12 +13,13 @@ use Qutlet\Allegro\OrderSync\SyncOrdersCommand;
 use PHPUnit\Framework\TestCase;
 
 /**
- * Charakteryzuje parsery strumienia `GET /order/events` używane przez import
- * zamówień, na kształcie REALNEJ zredagowanej próbki
+ * Charakteryzuje parsery strumienia `GET /order/events` używane przez pull zamówień,
+ * na kształcie REALNEJ zredagowanej próbki
  * (`docs/allegro-api-samples/GET_order-events.json` w qutlet-meta): wybór
- * `checkoutForm.id` WYŁĄCZNIE zdarzeń typu `READY_FOR_PROCESSING` (D-6.3.1),
- * zliczenie zdarzeń nie-READY oraz kursor (id ostatniego zdarzenia strony).
- * Testy BEZ WordPressa — metody są czystymi funkcjami.
+ * `checkoutForm.id` zdarzeń typu KONSUMOWANEGO (`READY_FOR_PROCESSING` +
+ * `FULFILLMENT_STATUS_CHANGED`/`BUYER_CANCELLED`/`AUTO_CANCELLED` — D-6.3.1/D-6.5.4),
+ * zliczenie zdarzeń pominiętych (`FILLED_IN`/`BOUGHT`) oraz kursor (id ostatniego
+ * zdarzenia strony). Testy BEZ WordPressa — metody są czystymi funkcjami.
  */
 final class SyncOrdersCommandTest extends TestCase {
 
@@ -60,45 +61,70 @@ final class SyncOrdersCommandTest extends TestCase {
 		);
 	}
 
-	public function test_ready_ids_takes_only_ready_for_processing_deduplicated(): void {
+	public function test_synced_ids_take_consumed_types_deduplicated(): void {
+		// Fixture: każde zamówienie ma READY_FOR_PROCESSING + FULFILLMENT_STATUS_CHANGED
+		// (oba konsumowane) → jeden wpis na zamówienie, kolejność pierwszego wystąpienia.
 		$this->assertSame(
 			array(
 				'00000004-0000-11f1-8000-000000000004',
 				'00000001-0000-11f1-8000-000000000001',
 			),
-			SyncOrdersCommand::ready_checkout_form_ids_from_events( $this->events() )
+			SyncOrdersCommand::synced_checkout_form_ids_from_events( $this->events() )
 		);
 	}
 
-	public function test_ready_ids_deduplicates_repeated_ready_events(): void {
+	public function test_synced_ids_include_cancellation_types_but_not_filled_in_bought(): void {
+		$events = array(
+			$this->event( '1', 'FILLED_IN', 'AAA' ),               // pomijane.
+			$this->event( '2', 'BOUGHT', 'AAA' ),                  // pomijane.
+			$this->event( '3', 'FULFILLMENT_STATUS_CHANGED', 'AAA' ), // konsumowane (wysyłka).
+			$this->event( '4', 'BUYER_CANCELLED', 'BBB' ),         // konsumowane (anulowanie).
+			$this->event( '5', 'AUTO_CANCELLED', 'CCC' ),          // konsumowane (anulowanie).
+		);
+
+		$this->assertSame(
+			array( 'AAA', 'BBB', 'CCC' ),
+			SyncOrdersCommand::synced_checkout_form_ids_from_events( $events )
+		);
+	}
+
+	public function test_synced_ids_deduplicate_repeated_events_for_one_order(): void {
 		$events = array(
 			$this->event( '1', 'READY_FOR_PROCESSING', 'AAA' ),
-			$this->event( '2', 'READY_FOR_PROCESSING', 'AAA' ), // to samo zamówienie ponownie.
+			$this->event( '2', 'FULFILLMENT_STATUS_CHANGED', 'AAA' ), // to samo zamówienie.
 			$this->event( '3', 'READY_FOR_PROCESSING', 'BBB' ),
 		);
 
-		$this->assertSame( array( 'AAA', 'BBB' ), SyncOrdersCommand::ready_checkout_form_ids_from_events( $events ) );
+		$this->assertSame( array( 'AAA', 'BBB' ), SyncOrdersCommand::synced_checkout_form_ids_from_events( $events ) );
 	}
 
-	public function test_ready_ids_empty_and_degenerate_input(): void {
-		$this->assertSame( array(), SyncOrdersCommand::ready_checkout_form_ids_from_events( array() ) );
-		$this->assertSame( array(), SyncOrdersCommand::ready_checkout_form_ids_from_events( array( 'nie-tablica', 42 ) ) );
-		// READY bez checkoutForm.id — pomijane.
+	public function test_synced_ids_empty_and_degenerate_input(): void {
+		$this->assertSame( array(), SyncOrdersCommand::synced_checkout_form_ids_from_events( array() ) );
+		$this->assertSame( array(), SyncOrdersCommand::synced_checkout_form_ids_from_events( array( 'nie-tablica', 42 ) ) );
+		// Konsumowany typ bez checkoutForm.id — pomijane.
 		$this->assertSame(
 			array(),
-			SyncOrdersCommand::ready_checkout_form_ids_from_events(
+			SyncOrdersCommand::synced_checkout_form_ids_from_events(
 				array( array( 'type' => 'READY_FOR_PROCESSING', 'order' => array() ) )
+			)
+		);
+		// Tylko niezapłacone (FILLED_IN/BOUGHT) → nic do przetworzenia.
+		$this->assertSame(
+			array(),
+			SyncOrdersCommand::synced_checkout_form_ids_from_events(
+				array( $this->event( '1', 'FILLED_IN', 'AAA' ), $this->event( '2', 'BOUGHT', 'AAA' ) )
 			)
 		);
 	}
 
-	public function test_non_ready_event_count(): void {
-		// 8 zdarzeń, 2 typu READY_FOR_PROCESSING → 6 nie-READY.
-		$this->assertSame( 6, SyncOrdersCommand::non_ready_event_count( $this->events() ) );
-		$this->assertSame( 0, SyncOrdersCommand::non_ready_event_count( array() ) );
+	public function test_skipped_event_count_counts_only_filled_in_and_bought(): void {
+		// 8 zdarzeń: 2 READY + 2 FULFILLMENT (konsumowane) vs 2 FILLED_IN + 2 BOUGHT.
+		$this->assertSame( 4, SyncOrdersCommand::skipped_event_count( $this->events() ) );
+		$this->assertSame( 0, SyncOrdersCommand::skipped_event_count( array() ) );
+		// Sam typ konsumowany → 0 pominiętych.
 		$this->assertSame(
 			0,
-			SyncOrdersCommand::non_ready_event_count( array( $this->event( '1', 'READY_FOR_PROCESSING', 'AAA' ) ) )
+			SyncOrdersCommand::skipped_event_count( array( $this->event( '1', 'FULFILLMENT_STATUS_CHANGED', 'AAA' ) ) )
 		);
 	}
 

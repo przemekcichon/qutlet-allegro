@@ -15,23 +15,31 @@ use WP_CLI;
 use function WP_CLI\Utils\get_flag_value;
 
 /**
- * `wp qutlet-allegro sync-orders` — przyrostowy import zamówień Allegro do natywnych
- * `WC_Order` (mapping §8, D-6.3.1–D-6.3.6). Odpalane RĘCZNIE (debug/testy);
- * automatyczny polling (scheduler WP-Cron wzorca `StockSyncScheduler`) to OSOBNY,
- * przyszły punkt (D-6.3.3, POZA zakresem P-6.3b) — gdy powstanie, konfiguracja
- * środowisk pójdzie wzorcem wp-config (P-6.2c), nie hardkodem.
+ * `wp qutlet-allegro sync-orders` — import ORAZ synchronizacja statusów zamówień
+ * Allegro → natywne `WC_Order` (mapping §8, D-6.3.1–D-6.3.6 + P-6.5c/D-6.5.1–D-6.5.7).
+ * Kierunek = TYLKO pull (D-6.5.1): slot `read`, zero zapisu do Allegro. Odpalane
+ * RĘCZNIE (debug/testy); automatyczny polling (scheduler WP-Cron wzorca
+ * `StockSyncScheduler`) to OSOBNY, przyszły punkt (D-6.3.3).
  *
- * ## Przebieg (D-6.3.6)
+ * ## Tor przyrostowy (kursor) — D-6.3.6 + P-6.5c
  * Przyrostowy polling `GET /order/events` z WŁASNYM kursorem
  * (`qutlet_allegro_order_sync_cursor_{środowisko}`, kontrakt §12.3) — NIE
- * współdzielonym z kursorem stanów P-6.2 (§10.5): osobni konsumenci tego samego
- * endpointu, osobne kursory. Ze zdarzeń bierzemy `checkoutForm.id` zdarzeń typu
- * `READY_FOR_PROCESSING` (D-6.3.1), pobieramy AUTORYTATYWNĄ treść
+ * współdzielonym z kursorem stanów P-6.2 (§10.5). Konsumujemy zdarzenia typów
+ * {@see self::CONSUMED_EVENT_TYPES}: `READY_FOR_PROCESSING` (import/treść) ORAZ
+ * tranzycje `FULFILLMENT_STATUS_CHANGED`/`BUYER_CANCELLED`/`AUTO_CANCELLED` (zmiana
+ * statusu, P-6.5c). Dla KAŻDEGO ich `checkoutForm.id` pobieramy AUTORYTATYWNĄ treść
  * `GET /order/checkout-forms/{id}` (§8d — nie budujemy zamówienia ze snapshotu
- * zdarzenia) i robimy idempotentny upsert `WC_Order` ({@see OrderWriter}). Zdarzenia
- * pozostałych typów (`FILLED_IN`, `BOUGHT`, `FULFILLMENT_STATUS_CHANGED`) są
- * POMIJANE i policzone w podsumowaniu (D-6.3.1) — tranzycje wysyłki/anulowania/
- * zwrotu mają kształt spoza próbki i domknie je osobny punkt (§8f).
+ * zdarzenia) i robimy idempotentny upsert ({@see OrderWriter} godzi oś treści i oś
+ * statusu, D-6.5.7). Zdarzenia `FILLED_IN`/`BOUGHT` (niezapłacone, próg = opłacone)
+ * są POMIJANE i policzone w podsumowaniu.
+ *
+ * ## Tor rekoncyliacji (`--full`) — D-6.5.6
+ * Kursor przyrostowy pokrywa PRZYSZŁOŚĆ, ale zamówienia zmienione zanim P-6.5c
+ * konsumował tranzycje (albo gdy zdarzenie przeleciało bez akcji) utknęłyby w
+ * `wc-processing`. `--full` iteruje zaimportowane `WC_Order` w stanie NIETERMINALNYM
+ * (mają `_qutlet_allegro_checkout_form_id`), dociąga ich bieżącą treść z Allegro i
+ * stosuje mapowanie — bez kursora. Wzorzec {@see \Qutlet\Allegro\OfferSync\SyncStockCommand}
+ * (`--full`).
  *
  * ## Rzetelność przebiegu (jak `SyncStockCommand`, D-6.G2)
  * Lock per środowisko ({@see OrderSyncLock}); HTTP 429 przerywa przebieg BEZ
@@ -67,9 +75,30 @@ final class SyncOrdersCommand {
 	private const EVENT_PAGE_LIMIT = 100;
 
 	/**
+	 * Rozmiar strony przy iteracji zaimportowanych zamówień w torze `--full`.
+	 */
+	private const ORDER_PAGE_LIMIT = 100;
+
+	/**
 	 * Bezpiecznik pętli paginacji (jak pozostałe komendy repo).
 	 */
 	private const MAX_PAGES = 200;
+
+	/**
+	 * Typy zdarzeń `order/events` KONSUMOWANE przez pull (kontrakt §12.5, D-6.3.1 +
+	 * D-6.5.4). `READY_FOR_PROCESSING` niesie próg importu/treści; pozostałe trzy to
+	 * tranzycje statusu (wysyłka + anulowanie). `FILLED_IN`/`BOUGHT` (niezapłacone)
+	 * świadomie POZA zbiorem — próg tworzenia = opłacone. Dla wszystkich pobieramy
+	 * autorytatywną treść i godzimy oś treści+statusu ({@see OrderWriter::upsert()}).
+	 *
+	 * @var array<int,string>
+	 */
+	private const CONSUMED_EVENT_TYPES = array(
+		OrderMapper::STATUS_READY, // 'READY_FOR_PROCESSING'
+		'FULFILLMENT_STATUS_CHANGED',
+		'BUYER_CANCELLED',
+		'AUTO_CANCELLED',
+	);
 
 	/**
 	 * Zapis zamówień do `WC_Order`.
@@ -99,10 +128,16 @@ final class SyncOrdersCommand {
 	 *   - production
 	 * ---
 	 *
+	 * [--full]
+	 * : Rekoncyliacja: zamiast toru przyrostowego (kursor `order/events`) iteruje
+	 *   zaimportowane `WC_Order` w stanie nieterminalnym i dociąga ich bieżący status
+	 *   z Allegro (nadrabia backlog/dryf; D-6.5.6).
+	 *
 	 * ## EXAMPLES
 	 *
 	 *     wp qutlet-allegro sync-orders
 	 *     wp qutlet-allegro sync-orders --environment=production
+	 *     wp qutlet-allegro sync-orders --environment=sandbox --full
 	 *
 	 * @param array<int,string>         $args       Argumenty pozycyjne (nieużywane).
 	 * @param array<string,string|bool> $assoc_args Flagi.
@@ -117,6 +152,8 @@ final class SyncOrdersCommand {
 			WP_CLI::error( sprintf( 'Nieznane środowisko: „%s" (dozwolone: sandbox, production).', $environment ) );
 		}
 
+		$full = (bool) get_flag_value( $assoc_args, 'full', false );
+
 		// Token i baza PRZED lockiem: `access_token()` przy braku kończy proces
 		// (`WP_CLI::error` → exit), co ominęłoby `finally` ze zwolnieniem zamka.
 		$access = $this->access_token( $environment, Environment::ROLE_READ );
@@ -124,14 +161,15 @@ final class SyncOrdersCommand {
 
 		$this->writer   = new OrderWriter();
 		$this->counters = array(
-			'created'   => 0,
-			'updated'   => 0,
-			'unchanged' => 0,
-			'trashed'   => 0,
-			'not_ready' => 0,
-			'skipped'   => 0,
-			'gone'      => 0,
-			'errors'    => 0,
+			'created'         => 0,
+			'updated'         => 0,
+			'status_updated'  => 0,
+			'unchanged'       => 0,
+			'trashed'         => 0,
+			'skipped_no_order' => 0,
+			'skipped_events'  => 0,
+			'gone'            => 0,
+			'errors'          => 0,
 		);
 
 		$lock = new OrderSyncLock();
@@ -145,7 +183,7 @@ final class SyncOrdersCommand {
 		}
 
 		try {
-			$fatal = $this->run( $environment, $api, $access );
+			$fatal = $this->run( $environment, $api, $access, $full );
 		} finally {
 			$lock->release( $environment );
 		}
@@ -157,14 +195,16 @@ final class SyncOrdersCommand {
 		$c = $this->counters;
 		WP_CLI::success(
 			sprintf(
-				'sync-orders (%s): utworzone %d, zaktualizowane %d, bez zmian %d, w koszu %d, nie-READY zdarzeń %d, pominięte %d, zniknięte (404) %d, błędy %d.',
+				'sync-orders (%s%s): utworzone %d, treść zaktualizowana %d, status zaktualizowany %d, bez zmian %d, w koszu %d, tranzycja bez zamówienia %d, zdarzeń pominiętych %d, zniknięte (404) %d, błędy %d.',
 				$environment,
+				$full ? ', --full' : '',
 				$c['created'],
 				$c['updated'],
+				$c['status_updated'],
 				$c['unchanged'],
 				$c['trashed'],
-				$c['not_ready'],
-				$c['skipped'],
+				$c['skipped_no_order'],
+				$c['skipped_events'],
 				$c['gone'],
 				$c['errors']
 			)
@@ -173,7 +213,32 @@ final class SyncOrdersCommand {
 
 	/**
 	 * Właściwy przebieg — POD lockiem, więc bez `WP_CLI::error()` (patrz docblock
-	 * klasy); błąd fatalny wraca stringiem. Wzorzec kursora/paginacji powielony z
+	 * klasy); błąd fatalny wraca stringiem. Rozgałęzia na tor przyrostowy (kursor)
+	 * albo rekoncyliację `--full` (D-6.5.6), jak {@see \Qutlet\Allegro\OfferSync\SyncStockCommand::run()}.
+	 *
+	 * @param string $environment Środowisko.
+	 * @param string $api         Baza REST API.
+	 * @param string $access      Access token slotu `read`.
+	 * @param bool   $full        Tryb rekoncyliacji zamiast przyrostu.
+	 * @return string|null Błąd fatalny albo null.
+	 */
+	private function run( string $environment, string $api, string $access, bool $full ): ?string {
+		if ( $full ) {
+			// Rekoncyliacja deleguje błędy HTTP do {@see self::sync_order()} (liczniki +
+			// backoff wewnątrz), więc nie ma własnej ścieżki błędu fatalnego.
+			$this->reconcile( $environment, $api, $access );
+
+			return null;
+		}
+
+		return $this->incremental( $environment, $api, $access );
+	}
+
+	/**
+	 * Tor przyrostowy — zdarzenia `order/events` od kursora → dla `checkoutForm.id`
+	 * typów {@see self::CONSUMED_EVENT_TYPES} pobierz autorytatywną treść i upsert.
+	 * Kursor przesuwa się DOPIERO po przetworzeniu całości (przerwany przebieg
+	 * powtarza pracę — upsert idempotentny). Wzorzec kursora/paginacji powielony z
 	 * {@see \Qutlet\Allegro\OfferSync\SyncStockCommand::incremental()}.
 	 *
 	 * @param string $environment Środowisko.
@@ -181,7 +246,7 @@ final class SyncOrdersCommand {
 	 * @param string $access      Access token slotu `read`.
 	 * @return string|null Błąd fatalny albo null.
 	 */
-	private function run( string $environment, string $api, string $access ): ?string {
+	private function incremental( string $environment, string $api, string $access ): ?string {
 		$option = self::OPTION_CURSOR_PREFIX . $environment;
 		$cursor = (string) get_option( $option, '' );
 
@@ -217,11 +282,11 @@ final class SyncOrdersCommand {
 				break;
 			}
 
-			foreach ( self::ready_checkout_form_ids_from_events( $events ) as $form_id ) {
+			foreach ( self::synced_checkout_form_ids_from_events( $events ) as $form_id ) {
 				$form_ids[ $form_id ] = true;
 			}
 
-			$skipped_seen += self::non_ready_event_count( $events );
+			$skipped_seen += self::skipped_event_count( $events );
 
 			$page_last = self::last_event_id( $events );
 
@@ -241,7 +306,7 @@ final class SyncOrdersCommand {
 			}
 		}
 
-		$this->counters['not_ready'] = $skipped_seen;
+		$this->counters['skipped_events'] = $skipped_seen;
 
 		if ( '' === $last_id ) {
 			// Strumień naprawdę pusty — kursor NIE jest ustawiany: przy pierwszym
@@ -253,23 +318,23 @@ final class SyncOrdersCommand {
 
 		if ( array() === $form_ids ) {
 			// Zdarzenia były (kursor musi ruszyć), ale żadne nie było typu
-			// READY_FOR_PROCESSING — nic do zaimportowania.
-			WP_CLI::log( sprintf( 'Brak zdarzeń READY_FOR_PROCESSING (%d nie-READY pominięto) — kursor przesunięty.', $skipped_seen ) );
+			// konsumowanego (same FILLED_IN/BOUGHT) — nic do przetworzenia.
+			WP_CLI::log( sprintf( 'Brak zdarzeń do przetworzenia (%d pominiętych FILLED_IN/BOUGHT) — kursor przesunięty.', $skipped_seen ) );
 			update_option( $option, $last_id, false );
 
 			return null;
 		}
 
 		if ( '' === $cursor ) {
-			WP_CLI::log( sprintf( 'Pierwszy przebieg (%s): %d zamówień READY_FOR_PROCESSING z dostępnej historii zdarzeń.', $environment, count( $form_ids ) ) );
+			WP_CLI::log( sprintf( 'Pierwszy przebieg (%s): %d zamówień z dostępnej historii zdarzeń do przetworzenia.', $environment, count( $form_ids ) ) );
 		} else {
-			WP_CLI::log( sprintf( 'Zdarzenia wskazują %d zamówień READY_FOR_PROCESSING do importu.', count( $form_ids ) ) );
+			WP_CLI::log( sprintf( 'Zdarzenia wskazują %d zamówień do przetworzenia.', count( $form_ids ) ) );
 		}
 
 		$fetch_error = false;
 
 		foreach ( array_keys( $form_ids ) as $form_id ) {
-			$status = $this->import_order( $api, $access, (string) $form_id );
+			$status = $this->sync_order( $api, $access, (string) $form_id );
 
 			if ( 'rate-limited' === $status ) {
 				WP_CLI::warning( 'HTTP 429 na checkout-forms — przerywam przebieg bez przesuwania kursora (backoff = kolejny przebieg).' );
@@ -278,7 +343,7 @@ final class SyncOrdersCommand {
 			}
 
 			if ( 'error' === $status ) {
-				// Nie przerywamy — inne zdrowe zamówienia z tego okna importujemy dalej;
+				// Nie przerywamy — inne zdrowe zamówienia z tego okna przetwarzamy dalej;
 				// ale zapamiętujemy, że kursora NIE wolno przesunąć (patrz niżej).
 				$fetch_error = true;
 			}
@@ -299,18 +364,112 @@ final class SyncOrdersCommand {
 	}
 
 	/**
-	 * Pobiera autorytatywną treść zamówienia i robi upsert `WC_Order`. Zwraca
-	 * `rate-limited` przy 429 (wołający przerywa BEZ przesuwania kursora) oraz `error`
-	 * przy przejściowym błędzie pobrania treści (wołający WSTRZYMUJE kursor, ale
-	 * dokańcza pozostałe zamówienia). `skip` = świadome pominięcie z przesunięciem
-	 * kursora (404 zniknęło / nie-READY w checkout-form).
+	 * Tor rekoncyliacji (`--full`, D-6.5.6): iteruje zaimportowane `WC_Order` w stanie
+	 * NIETERMINALNYM (mają klucz `_qutlet_allegro_checkout_form_id`) i dla każdego
+	 * dociąga bieżącą treść z Allegro, stosując mapowanie statusu ({@see self::sync_order()}).
+	 * Bez kursora — nadrabia backlog/dryf, których tor przyrostowy nie złapał (zdarzenie
+	 * fulfillmentu przeleciało zanim P-6.5c je konsumował). Snapshot id z góry, żeby
+	 * tranzycja statusu w trakcie nie zaburzyła paginacji.
+	 *
+	 * @param string $environment Środowisko (log; slot `read` wspólny).
+	 * @param string $api         Baza REST API.
+	 * @param string $access      Access token slotu `read`.
+	 * @return void
+	 */
+	private function reconcile( string $environment, string $api, string $access ): void {
+		$form_ids = $this->nonterminal_imported_form_ids();
+
+		if ( array() === $form_ids ) {
+			WP_CLI::log( sprintf( 'Rekoncyliacja (%s): brak zaimportowanych zamówień w stanie nieterminalnym — nic do zrobienia.', $environment ) );
+
+			return;
+		}
+
+		WP_CLI::log( sprintf( 'Rekoncyliacja (%s): %d zamówień nieterminalnych do sprawdzenia.', $environment, count( $form_ids ) ) );
+
+		foreach ( $form_ids as $form_id ) {
+			$status = $this->sync_order( $api, $access, $form_id );
+
+			if ( 'rate-limited' === $status ) {
+				WP_CLI::warning( 'HTTP 429 na checkout-forms — przerywam rekoncyliację (dokończy następny przebieg --full).' );
+
+				return;
+			}
+		}
+	}
+
+	/**
+	 * `checkoutForm.id` zaimportowanych `WC_Order` (mają klucz idempotencji
+	 * `_qutlet_allegro_checkout_form_id`, kontrakt §12.1) w stanie NIETERMINALNYM.
+	 * Terminalne (`completed`/`cancelled`/`refunded`) i kosz pomijamy — Allegro nie
+	 * cofa ich mapowaniem P-6.5c, a zwrot to osobny punkt (D-6.5.3). `wc-shipped`
+	 * (D-6.5.5) jest świadomie NIETERMINALNY, więc pozostaje w zbiorze (łapiemy
+	 * tranzycję `shipped → completed`). Zbieramy same id z góry (snapshot) — dalsze
+	 * przetwarzanie mutuje statusy, więc nie iterujemy „żywych" wyników zapytania.
+	 *
+	 * @return array<int,string>
+	 */
+	private function nonterminal_imported_form_ids(): array {
+		$statuses = array( 'wc-pending', 'wc-on-hold', 'wc-' . OrderMapper::WC_PROCESSING, 'wc-' . OrderMapper::WC_SHIPPED );
+		$form_ids = array();
+
+		for ( $page = 1; $page <= self::MAX_PAGES; $page++ ) {
+			$orders = wc_get_orders(
+				array(
+					'limit'      => self::ORDER_PAGE_LIMIT,
+					'paged'      => $page,
+					'status'     => $statuses,
+					'orderby'    => 'ID',
+					'order'      => 'ASC',
+					'meta_query' => array( // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_query -- klucz idempotencji importu zamówień (kontrakt §12.1); rekoncyliacja iteruje tylko zaimportowane zamówienia.
+						array(
+							'key'     => OrderWriter::META_CHECKOUT_FORM_ID,
+							'compare' => 'EXISTS',
+						),
+					),
+				)
+			);
+
+			if ( ! is_array( $orders ) || array() === $orders ) {
+				break;
+			}
+
+			foreach ( $orders as $order ) {
+				// `wc_get_orders` (bez `return`) daje obiekty `WC_Order` (stub gwarantuje
+				// typ); czytamy klucz idempotencji przez WC CRUD (spójnie pod HPOS/legacy).
+				$form_id = (string) $order->get_meta( OrderWriter::META_CHECKOUT_FORM_ID );
+
+				if ( '' !== $form_id ) {
+					$form_ids[] = $form_id;
+				}
+			}
+
+			if ( count( $orders ) < self::ORDER_PAGE_LIMIT ) {
+				break;
+			}
+
+			if ( self::MAX_PAGES === $page ) {
+				WP_CLI::warning( sprintf( 'Rekoncyliacja: przerwano zbieranie zamówień na bezpieczniku %d stron — resztę dociągnie następny przebieg --full.', self::MAX_PAGES ) );
+			}
+		}
+
+		return $form_ids;
+	}
+
+	/**
+	 * Pobiera autorytatywną treść zamówienia (§8d) i robi upsert `WC_Order` (import
+	 * treści + synchronizacja statusu — {@see OrderWriter::upsert()} rozstrzyga
+	 * create/status/skip). Zwraca `rate-limited` przy 429 (wołający przerywa BEZ
+	 * przesuwania kursora) oraz `error` przy przejściowym błędzie pobrania treści
+	 * (wołający WSTRZYMUJE kursor, dokańczając pozostałe). `skip` = świadome pominięcie
+	 * z przesunięciem kursora (404 zniknęło).
 	 *
 	 * @param string $api     Baza REST API.
 	 * @param string $access  Access token slotu `read`.
 	 * @param string $form_id `checkoutForm.id`.
 	 * @return string `ok` / `skip` / `error` / `rate-limited`.
 	 */
-	private function import_order( string $api, string $access, string $form_id ): string {
+	private function sync_order( string $api, string $access, string $form_id ): string {
 		$resp = $this->get( $api . '/order/checkout-forms/' . rawurlencode( $form_id ), $access );
 
 		if ( 429 === $resp['status'] ) {
@@ -326,31 +485,21 @@ final class SyncOrdersCommand {
 
 		if ( 200 !== $resp['status'] || ! is_array( $resp['data'] ) ) {
 			// Błąd PRZEJŚCIOWY pobrania treści (5xx/sieć), inny niż 404 (zniknęło) —
-			// zwracamy `error`, żeby wołający WSTRZYMAŁ kursor: bez toru rekoncyliacji
-			// (odpowiednika `--full` w SyncStockCommand) przesunięcie kursora nad
-			// nieodczytane zamówienie zgubiłoby OPŁACONĄ sprzedaż na zawsze (D-6.3.2 —
-			// realna sprzedaż nie może zniknąć; zdarzenie READY zwykle się nie powtarza).
-			// Kolejny przebieg ponowi całe okno — upsert jest idempotentny (rewizja NO-OP),
-			// więc zdrowe zamówienia to tanie NO-OP-y.
+			// zwracamy `error`, żeby wołający (tor przyrostowy) WSTRZYMAŁ kursor:
+			// przesunięcie nad nieodczytane zdarzenie READY zgubiłoby OPŁACONĄ sprzedaż
+			// (D-6.3.2 — zdarzenie READY zwykle się nie powtarza; backlog dociąga
+			// `--full`). Kolejny przebieg ponowi całe okno — upsert jest idempotentny.
 			++$this->counters['errors'];
 			WP_CLI::warning( sprintf( 'Zamówienie %s: checkout-forms → HTTP %d %s', $form_id, $resp['status'], $this->error_detail( $resp ) ) );
 
 			return 'error';
 		}
 
-		$form = $resp['data'];
-
-		// Autorytatywny status z checkout-form (§8d): zamówienie mogło już opuścić
-		// READY_FOR_PROCESSING między zdarzeniem a pobraniem treści (D-6.3.1 —
-		// tranzycje poza READY są poza zakresem; skip + log).
-		if ( ! OrderMapper::is_ready( $form ) ) {
-			++$this->counters['skipped'];
-			WP_CLI::log( sprintf( '  zamówienie %s nie jest READY_FOR_PROCESSING w checkout-form — pomijam (D-6.3.1).', $form_id ) );
-
-			return 'skip';
-		}
-
-		$result = $this->writer->upsert( $form );
+		// Cała decyzja (utworzyć / zmienić status / pominąć bez zamówienia / kosz) w
+		// {@see OrderWriter::upsert()}: import treści dla READY_FOR_PROCESSING oraz
+		// synchronizacja statusu z obu osi (P-6.5c). NIE bramkujemy tu `is_ready()` —
+		// tranzycje (SENT/CANCELLED) muszą dojść do istniejącego zamówienia.
+		$result = $this->writer->upsert( $resp['data'] );
 
 		foreach ( $result['warnings'] as $warning ) {
 			WP_CLI::warning( sprintf( 'Zamówienie %s: %s', $form_id, $warning ) );
@@ -376,10 +525,18 @@ final class SyncOrdersCommand {
 				break;
 			case 'updated':
 				++$this->counters['updated'];
-				WP_CLI::log( sprintf( '  zamówienie %s → zaktualizowane WC_Order %d (zmiana rewizji).', $form_id, $result['order_id'] ) );
+				WP_CLI::log( sprintf( '  zamówienie %s → zaktualizowana treść WC_Order %d (zmiana rewizji).', $form_id, $result['order_id'] ) );
+				break;
+			case 'status-updated':
+				++$this->counters['status_updated'];
+				WP_CLI::log( sprintf( '  zamówienie %s → status WC_Order %d zsynchronizowany z Allegro (P-6.5c).', $form_id, $result['order_id'] ) );
 				break;
 			case 'unchanged':
 				++$this->counters['unchanged'];
+				break;
+			case 'skipped-no-order':
+				++$this->counters['skipped_no_order'];
+				WP_CLI::log( sprintf( '  zamówienie %s → tranzycja bez zaimportowanego zamówienia — pomijam (nie tworzymy z połowy cyklu, P-6.5c).', $form_id ) );
 				break;
 			case 'skipped-trashed':
 				++$this->counters['trashed'];
@@ -393,8 +550,9 @@ final class SyncOrdersCommand {
 	}
 
 	/**
-	 * Unikalne `checkoutForm.id` zdarzeń typu `READY_FOR_PROCESSING` (D-6.3.1) —
-	 * jedyny typ, dla którego tworzymy `WC_Order`. Kolejność pierwszego wystąpienia.
+	 * Unikalne `checkoutForm.id` zdarzeń typu KONSUMOWANEGO ({@see self::CONSUMED_EVENT_TYPES}:
+	 * `READY_FOR_PROCESSING` + tranzycje wysyłki/anulowania). Kolejność pierwszego
+	 * wystąpienia. Dla każdego id wołający pobiera autorytatywną treść i upsertuje.
 	 *
 	 * Czysta funkcja statyczna — testowana PHPUnitem na kształcie realnej próbki
 	 * (`docs/allegro-api-samples/GET_order-events.json`).
@@ -402,7 +560,7 @@ final class SyncOrdersCommand {
 	 * @param array<int,mixed> $events Zdarzenia z `GET /order/events`.
 	 * @return array<int,string> Unikalne id zamówień.
 	 */
-	public static function ready_checkout_form_ids_from_events( array $events ): array {
+	public static function synced_checkout_form_ids_from_events( array $events ): array {
 		$ids = array();
 
 		foreach ( $events as $event ) {
@@ -410,7 +568,7 @@ final class SyncOrdersCommand {
 				continue;
 			}
 
-			if ( OrderMapper::STATUS_READY !== ( $event['type'] ?? null ) ) {
+			if ( ! in_array( $event['type'] ?? null, self::CONSUMED_EVENT_TYPES, true ) ) {
 				continue;
 			}
 
@@ -427,18 +585,18 @@ final class SyncOrdersCommand {
 	}
 
 	/**
-	 * Liczba zdarzeń INNEGO typu niż `READY_FOR_PROCESSING` na stronie (D-6.3.1 —
-	 * „pomijane + logowane" jako podsumowanie, bez zaśmiecania logu wpisem na każde).
-	 * Czysta funkcja statyczna (testy).
+	 * Liczba zdarzeń POMINIĘTYCH — typu spoza {@see self::CONSUMED_EVENT_TYPES}
+	 * (`FILLED_IN`/`BOUGHT`: niezapłacone) — jako podsumowanie, bez zaśmiecania logu
+	 * wpisem na każde. Czysta funkcja statyczna (testy).
 	 *
 	 * @param array<int,mixed> $events Zdarzenia strony.
 	 * @return int
 	 */
-	public static function non_ready_event_count( array $events ): int {
+	public static function skipped_event_count( array $events ): int {
 		$count = 0;
 
 		foreach ( $events as $event ) {
-			if ( is_array( $event ) && OrderMapper::STATUS_READY !== ( $event['type'] ?? null ) ) {
+			if ( is_array( $event ) && ! in_array( $event['type'] ?? null, self::CONSUMED_EVENT_TYPES, true ) ) {
 				++$count;
 			}
 		}
