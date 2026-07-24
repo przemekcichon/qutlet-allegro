@@ -67,6 +67,14 @@ final class OrderMapper {
 	public const FULFILLMENT_RETURNED = 'RETURNED';
 
 	/**
+	 * `fulfillment.status = CANCELLED` — udokumentowana wartość osi realizacji (§8c),
+	 * ale anulowanie łapie oś PRIORYTETOWA `status = CANCELLED` (D-6.5.4), więc na osi
+	 * fulfillment mapuje się na „bez zmiany" (`null`). Stała nazwana, by wołający NIE
+	 * mylił jej z wartością NIEZNANĄ (rozróżnienie w logu — {@see OrderWriter::note_unmapped_status()}).
+	 */
+	public const FULFILLMENT_CANCELLED = 'CANCELLED';
+
+	/**
 	 * Docelowe slugi statusów `WC_Order` BEZ prefiksu `wc-` (forma, jaką zwraca
 	 * `WC_Order::get_status()` i przyjmuje `set_status()` — prefiks normalizuje sam
 	 * Woo). VERBATIM z instalacji WooCommerce oraz kontraktu §12.5:

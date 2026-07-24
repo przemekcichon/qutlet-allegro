@@ -272,9 +272,10 @@ final class OrderWriter {
 
 	/**
 	 * Dokłada ostrzeżenie, gdy {@see OrderMapper::woo_status()} nie dał mapowania
-	 * (`null`) dla istniejącego zamówienia — rozróżniając zwrot (D-6.5.3, poza
-	 * zakresem P-6.5) od wartości NIEROZPOZNANEJ (Allegro dodaje statusy z czasem,
-	 * D-6.5.4). Pusty `fulfillment` (brak sygnału) → cicho, bez ostrzeżenia.
+	 * (`null`) dla istniejącego zamówienia — rozróżniając trzy przypadki: zwrot
+	 * (D-6.5.3, poza zakresem P-6.5), udokumentowany `fulfillment = CANCELLED`
+	 * (anulowanie łapie oś priorytetowa `status`, D-6.5.4) oraz wartość NIEROZPOZNANĄ
+	 * (Allegro dodaje statusy z czasem). Pusty `fulfillment` (brak sygnału) → cicho.
 	 *
 	 * @param array<string,mixed> $form     Pełna zwrotka zamówienia.
 	 * @param array<int,string>   $warnings Akumulator ostrzeżeń (przez referencję).
@@ -285,6 +286,14 @@ final class OrderWriter {
 
 		if ( OrderMapper::FULFILLMENT_RETURNED === $fulfillment ) {
 			$warnings[] = 'fulfillment.status=RETURNED — zwrot poza zakresem P-6.5 (D-6.5.3): status bez zmiany, obsłuży osobny punkt.';
+
+			return;
+		}
+
+		if ( OrderMapper::FULFILLMENT_CANCELLED === $fulfillment ) {
+			// Udokumentowany enum — nie „nieznany". Anulowanie rozstrzyga oś
+			// PRIORYTETOWA `status = CANCELLED` (D-6.5.4); na osi fulfillment bez zmiany.
+			$warnings[] = 'fulfillment.status=CANCELLED bez status=CANCELLED — anulowanie steruje osią „status" (D-6.5.4): status bez zmiany.';
 
 			return;
 		}

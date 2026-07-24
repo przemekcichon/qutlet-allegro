@@ -407,6 +407,11 @@ final class SyncOrdersCommand {
 	 * tranzycję `shipped → completed`). Zbieramy same id z góry (snapshot) — dalsze
 	 * przetwarzanie mutuje statusy, więc nie iterujemy „żywych" wyników zapytania.
 	 *
+	 * `wc-failed` też pomijamy (traktowany jak terminalny — nieopłacony/porzucony;
+	 * import nie tworzy zamówień w tym stanie, więc rekoncyliacja nie ma czego w nim
+	 * nadrabiać). Zbiór to statusy NIETERMINALNE, w których realnie żyją zaimportowane
+	 * zamówienia Allegro.
+	 *
 	 * @return array<int,string>
 	 */
 	private function nonterminal_imported_form_ids(): array {
