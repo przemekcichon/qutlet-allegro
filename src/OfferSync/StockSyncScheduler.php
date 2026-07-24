@@ -47,7 +47,10 @@ use WP_CLI;
  * {@see \Qutlet\Allegro\Auth\RefreshScheduler}, który też leci po WSZYSTKICH
  * slotach (środowisko × rola), nie tylko produkcyjnych. Koszt jest pomijalny:
  * sandbox i produkcja to OSOBNE aplikacje/limity Allegro (D-2.G3), więc podwojenie
- * liczby wywołań nie zagraża żadnemu współdzielonemu rate limitowi.
+ * liczby wywołań nie zagraża żadnemu współdzielonemu rate limitowi. Kolejność
+ * ({@see self::ENVIRONMENTS}) — produkcja pierwsza, jak w
+ * `RefreshScheduler::slots()` — dla spójności, choć fault-isolation niżej sprawia,
+ * że kolejność nie wpływa już na to, czy drugie środowisko dostanie szansę.
  *
  * ## Dlaczego `WP_CLI::runcommand()`, nie bezpośrednie wywołanie `SyncStockCommand`
  * `wp cron event run --due-now` to pełny proces WP-CLI, więc `WP_CLI::error()`
@@ -56,6 +59,16 @@ use WP_CLI;
  * tym samym tyknięciu (np. `Auth\RefreshScheduler`). `WP_CLI::runcommand()` z
  * `exit_error => false` uruchamia komendę W TYM SAMYM procesie (bez nowego
  * PHP — `launch => false`), ale zamienia `exit()` na zwykły powrót z kodem błędu.
+ *
+ * ## Izolacja błędów między środowiskami (poprawka po niezależnej recenzji PR #14)
+ * `exit_error => false` neutralizuje WYŁĄCZNIE ścieżkę `WP_CLI::error()`/
+ * `ExitException` — nie chroni przed innym `\Throwable` (np. `TypeError` z
+ * nietypowej odpowiedzi API), który przerwałby `foreach` w
+ * {@see self::run_incremental()}/{@see self::run_full()} i zostawił KOLEJNE
+ * środowisko bez szansy wykonania w tym tyknięciu, bez śladu w logu. Inaczej niż
+ * `RefreshScheduler::run()`, który dostaje tę gwarancję „za darmo" (jego
+ * `TokenRefresher::refresh()` ZWRACA `WP_Error`, nigdy nie rzuca), tu trzeba to
+ * zrobić jawnie — {@see self::run_command()} łapie `\Throwable` per środowisko.
  *
  * ## Samonaprawa OBEJMUJE zmianę interwału, nie tylko brak zaplanowania
  * {@see self::ensure_scheduled()} nie tylko planuje zdarzenie, gdy go brak — także
@@ -104,11 +117,12 @@ final class StockSyncScheduler {
 
 	/**
 	 * Oba środowiska — patrz docblock klasy („Dlaczego OBA środowiska…"), wzorzec
-	 * z `Auth\RefreshScheduler::slots()` (tam też oba środowiska, każda oś osobno).
+	 * z `Auth\RefreshScheduler::slots()` (tam też oba środowiska, każda oś osobno;
+	 * kolejność produkcja→sandbox dla spójności z tamtym wzorcem).
 	 *
 	 * @var array<int,string>
 	 */
-	private const ENVIRONMENTS = array( Environment::SANDBOX, Environment::PRODUCTION );
+	private const ENVIRONMENTS = array( Environment::PRODUCTION, Environment::SANDBOX );
 
 	/**
 	 * Wpina hooki: własny interwał, oba zdarzenia crona i samonaprawialne
@@ -214,18 +228,26 @@ final class StockSyncScheduler {
 
 	/**
 	 * Uruchamia komendę w TYM SAMYM procesie WP-CLI, bez `exit()` na błędzie —
-	 * patrz docblock klasy („Dlaczego `WP_CLI::runcommand()`").
+	 * patrz docblock klasy („Dlaczego `WP_CLI::runcommand()`"). Łapie też KAŻDY
+	 * inny `\Throwable` (patrz docblock klasy „Izolacja błędów między
+	 * środowiskami") — awaria jednego środowiska w pętli
+	 * {@see self::run_incremental()}/{@see self::run_full()} nie może odebrać
+	 * szansy kolejnemu.
 	 *
 	 * @param string $command Pełna komenda WP-CLI (bez wiodącego `wp `).
 	 * @return void
 	 */
 	private static function run_command( string $command ): void {
-		WP_CLI::runcommand(
-			preg_replace( '/^wp\s+/', '', $command ),
-			array(
-				'launch'     => false,
-				'exit_error' => false,
-			)
-		);
+		try {
+			WP_CLI::runcommand(
+				preg_replace( '/^wp\s+/', '', $command ),
+				array(
+					'launch'     => false,
+					'exit_error' => false,
+				)
+			);
+		} catch ( \Throwable $e ) {
+			WP_CLI::warning( sprintf( '%s: nieoczekiwany wyjątek — %s', $command, $e->getMessage() ) );
+		}
 	}
 }
