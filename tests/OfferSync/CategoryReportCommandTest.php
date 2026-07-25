@@ -53,7 +53,8 @@ final class CategoryReportCommandTest extends TestCase {
 	}
 
 	public function test_build_row_flags_drift_when_current_differs_from_rule(): void {
-		// Liść dziś w koszu `pozostale`, ale reguła gałęzi każe `laptopy` — do zmiany.
+		// Liść dziś w koszu `pozostale`, ale reguła gałęzi (fallback `2`) każe
+		// `komputery-i-podzespoly` — do zmiany.
 		$path = array(
 			array(
 				'id'   => '424242',
@@ -68,24 +69,25 @@ final class CategoryReportCommandTest extends TestCase {
 		$row = CategoryReportCommand::build_row( '424242', $path, 5, array( CategoryMapRules::FALLBACK_SLUG ) );
 
 		$this->assertSame( 'branch', $row['matched_rule_type'] );
-		$this->assertSame( 'laptopy', $row['matched_rule_slug'] );
+		$this->assertSame( 'komputery-i-podzespoly', $row['matched_rule_slug'] );
 		$this->assertSame( CategoryMapRules::FALLBACK_SLUG, $row['current_product_cat'] );
 		$this->assertSame( 'do-zmiany', $row['status'] );
 	}
 
 	public function test_build_row_no_rule_matches_expected_fallback(): void {
+		// Gałąź celowo spoza tabeli (P-6.8b pokrywa realne gałęzie z raportu 120 liści).
 		$path = array(
 			array(
-				'id'   => '260556',
-				'name' => 'Grille elektryczne',
+				'id'   => '900001',
+				'name' => 'Fikcyjny liść bez reguły',
 			),
 			array(
-				'id'   => '10',
-				'name' => 'RTV i AGD',
+				'id'   => '900000',
+				'name' => 'Fikcyjna gałąź bez reguły',
 			),
 		);
 
-		$row = CategoryReportCommand::build_row( '260556', $path, 3, array( CategoryMapRules::FALLBACK_SLUG ) );
+		$row = CategoryReportCommand::build_row( '900001', $path, 3, array( CategoryMapRules::FALLBACK_SLUG ) );
 
 		$this->assertSame( 'brak', $row['matched_rule_type'] );
 		$this->assertSame( CategoryMapRules::FALLBACK_SLUG, $row['matched_rule_slug'] );

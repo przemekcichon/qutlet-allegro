@@ -16,11 +16,16 @@ namespace Qutlet\Allegro\OfferSync;
  * gałęzi wyższej. Ścieżka wejściowa idzie od liścia do korzenia (mapping §7b),
  * więc pierwsze trafienie przy przejściu tablicy JEST najbliższe.
  *
- * Tabela startowa = węzły rozwiązywalne z próbek (mapping §7d — jawnie
- * ILUSTRACYJNA, nie pełna). Oferta bez żadnej reguły dostaje term-kosz
- * `pozostale` (D-6.1.2), a komenda loguje nierozwiązaną gałąź (id + nazwy),
- * żeby kurator dopisał tu regułę — tabela ROŚNIE w toku kuracji (mapping §7e);
- * ustabilizowane slugi wracają do `kontrakt-danych.md` §1.
+ * Tabela ustabilizowana kuracją P-6.8b (sesja 2026-07-25, mapping §7e) na
+ * podstawie pełnego raportu 120 liści (`wp qutlet-allegro category-report`).
+ * Zastępuje startową, jawnie ILUSTRACYJNĄ tabelę z P-4.2 (mapping §7d), która
+ * kluczowała się tylko dwiema szerokimi gałęziami („Komputery" → `laptopy`,
+ * „Telefony i Akcesoria" → `smartfony`) i łapała w nie produkty spoza
+ * deklarowanej domeny (247 i 148 produktów, w większości NIE laptopy/telefony).
+ * Oferta bez żadnej reguły dostaje term-kosz `pozostale` (D-6.1.2), a komenda
+ * loguje nierozwiązaną gałąź (id + nazwy), żeby kurator dopisał tu regułę —
+ * tabela ROŚNIE dalej w toku kuracji; ustabilizowane slugi wracają do
+ * `kontrakt-danych.md` §1.1.
  *
  * Id kategorii to opaque stringi (liść bywa numeryczny, korzeń bywa UUID — §7a).
  * Uwaga środowiska: id sandboxa są dziś 1:1 z produkcją (pomiar
@@ -44,21 +49,60 @@ final class CategoryMapRules {
 	 * @var array<array-key,string>
 	 */
 	private const LEAF_RULES = array(
-		'85166' => 'audio',     // „Bezprzewodowe" — słuchawki BT (oferta 18780385602, P-3.1).
-		'4575'  => 'peryferia', // Myszy (P-3.1 index.csv) — term spoza czwórki prototypu (mapping §7e).
+		'85166'  => 'audio',     // „Bezprzewodowe" — słuchawki BT (oferta 18780385602, P-3.1).
+		'4575'   => 'peryferia', // Myszy (P-3.1 index.csv); dziś pokryte też branżowo przez `4564`.
+		'4569'   => 'gaming',    // Pady (kontroler gier) — nadpisuje gałąź `4564` (peryferia).
+		'259427' => 'audio',     // Słuchawki przewodowe (komputerowe) — nadpisuje gałąź `259422` (peryferia).
+		'259426' => 'audio',     // Słuchawki bezprzewodowe (komputerowe) — jw.
+		'259434' => 'audio',     // Głośniki (komputerowe) — bezpośrednie dziecko gałęzi `2`.
+		'82326'  => 'gaming',    // „Gry na konsole" (gałąź „Gry", bez własnej reguły gałęzi).
+		'260043' => 'gaming',    // Gogle VR — nadpisuje fallback gałęzi `2`.
+		'257064' => 'gaming',    // Fotele gamingowe — nadpisuje gałąź `497` (peryferia).
+		'491'    => 'komputery', // Laptopy (realne) — nadpisuje fallback gałęzi `2`.
+		'486'    => 'komputery', // Komputery stacjonarne (realne) — jw.
+		'147906' => 'zasilanie', // Zasilacze do laptopów — nadpisuje fallback gałęzi `2`.
 	);
 
 	/**
 	 * Reguły gałęzi: id przodka → slug `product_cat` (priorytet wg bliskości
-	 * liścia). Klucz `array-key` — jak wyżej.
+	 * liścia). Klucz `array-key` — jak wyżej. Kuracja P-6.8b (mapping §7e):
+	 * gałęzie węższe (np. `4226`) trafiają zanim dopasowanie dojdzie do
+	 * szerszego fallbacku tej samej domeny (np. `2`), bo ścieżka idzie od
+	 * liścia do korzenia — bliższy węzeł zawsze wygrywa.
 	 *
 	 * @var array<array-key,string>
 	 */
 	private const BRANCH_RULES = array(
-		'4'      => 'smartfony', // „Telefony i Akcesoria".
-		'2'      => 'laptopy',   // „Komputery".
-		'122233' => 'gaming',    // „Konsole i automaty".
-		'122332' => 'audio',     // „Sprzęt estradowy, studyjny i DJ-ski".
+		// Telefony.
+		'4'      => 'telefony-akcesoria', // „Telefony i Akcesoria" — 100% akcesoriów, 0 telefonów w katalogu.
+		// Komputery — węższe gałęzie NAJPIERW (bliżej liścia niż `2`).
+		'4226'   => 'komputery-i-podzespoly', // „Podzespoły komputerowe".
+		'4475'   => 'komputery-i-podzespoly', // „Dyski i pamięci przenośne".
+		'260017' => 'monitory',               // „Monitory komputerowe".
+		'4564'   => 'peryferia',              // „Urządzenia wskazujące" (myszki/klawiatury/pady).
+		'259422' => 'peryferia',              // „Mikrofony i słuchawki" (domyślnie mikrofon; słuchawki → wyjątek audio).
+		'89253'  => 'peryferia',              // „Tablety" (akcesoria).
+		'497'    => 'peryferia',              // „Akcesoria (Laptop, PC)" — fallback (torby, stacje dokujące, podstawki).
+		'4689'   => 'kable-i-adaptery',        // „Kable, taśmy, przedłużacze" (PC).
+		'4691'   => 'kable-i-adaptery',        // „Przejściówki, śledzie" (PC).
+		'4413'   => 'urzadzenia-sieciowe',     // „Urządzenia sieciowe" (routery, karty sieciowe, kamery IP, huby USB).
+		'4578'   => 'drukowanie',              // „Drukarki i skanery" (tonery/tusze/bębny).
+		'4551'   => 'zasilanie',               // „Listwy zasilające i UPS".
+		'2'      => 'komputery-i-podzespoly',  // „Komputery" — fallback (był `laptopy`); realne komputery → wyjątki liść.
+		// Konsole / audio estradowe (bez zmian względem P-4.2).
+		'122233' => 'gaming', // „Konsole i automaty".
+		'122332' => 'audio',  // „Sprzęt estradowy, studyjny i DJ-ski".
+		// RTV i AGD — węższe gałęzie NAJPIERW (bliżej liścia niż `10`).
+		'67193'  => 'kable-i-adaptery', // „Elektronika" (domena kabli/przewodów RTV).
+		'67414'  => 'agd-drobne',       // „AGD drobne".
+		'67093'  => 'gps-i-lokalizacja', // „GPS i akcesoria".
+		'10'     => 'agd-drobne', // „RTV i AGD" — fallback (TV-uchwyty, car audio, akcesoria kamer — marginalne).
+		// Dom i Ogród.
+		'5317'   => 'oswietlenie', // „Oświetlenie".
+		'1532'   => 'ogrod',       // „Ogród".
+		'5'      => 'ogrod',       // „Dom i Ogród" — fallback (budownictwo/ogrzewanie — marginalne).
+		// Zdrowie.
+		'121882' => 'higiena-i-zdrowie', // „Zdrowie".
 	);
 
 	/**
@@ -67,12 +111,24 @@ final class CategoryMapRules {
 	 * @var array<string,string>
 	 */
 	private const TERM_NAMES = array(
-		'smartfony' => 'Smartfony',
-		'laptopy'   => 'Laptopy',
-		'audio'     => 'Audio',
-		'gaming'    => 'Gaming',
-		'peryferia' => 'Peryferia',
-		'pozostale' => 'Pozostałe',
+		'smartfony'              => 'Smartfony',
+		'telefony-akcesoria'     => 'Akcesoria do telefonów',
+		'komputery'              => 'Komputery',
+		'komputery-i-podzespoly' => 'Podzespoły komputerowe',
+		'monitory'               => 'Monitory',
+		'peryferia'              => 'Peryferia',
+		'kable-i-adaptery'       => 'Kable i adaptery',
+		'urzadzenia-sieciowe'    => 'Urządzenia sieciowe',
+		'drukowanie'             => 'Drukowanie',
+		'zasilanie'              => 'Zasilanie',
+		'audio'                  => 'Audio',
+		'gaming'                 => 'Gaming',
+		'agd-drobne'             => 'AGD drobne',
+		'oswietlenie'            => 'Oświetlenie',
+		'ogrod'                  => 'Ogród',
+		'gps-i-lokalizacja'      => 'GPS i lokalizacja',
+		'higiena-i-zdrowie'      => 'Higiena i zdrowie',
+		'pozostale'              => 'Pozostałe',
 	);
 
 	/**
