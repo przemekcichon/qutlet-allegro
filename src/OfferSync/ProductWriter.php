@@ -423,10 +423,14 @@ final class ProductWriter {
 	/**
 	 * Zapewnia term `product_cat` o kuratorskim slugu (nazwa z tabeli reguł).
 	 *
+	 * Publiczna — tej samej logiki (utworzenie termu przy pierwszym użyciu) potrzebuje
+	 * re-kategoryzacja `CategoryReportCommand::--apply` (P-6.8a), żeby nie duplikować
+	 * tworzenia termu poza tym miejscem.
+	 *
 	 * @param string $slug Slug termu.
 	 * @return int|null `term_id` albo null przy błędzie utworzenia.
 	 */
-	private function ensure_product_cat_term( string $slug ): ?int {
+	public function ensure_product_cat_term( string $slug ): ?int {
 		$existing = term_exists( $slug, 'product_cat' );
 
 		if ( is_array( $existing ) ) {
