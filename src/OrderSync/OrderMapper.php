@@ -294,10 +294,40 @@ final class OrderMapper {
 	 * Woo — ustala import: metoda „allegro" ({@see OrderWriter}), tytuł stały
 	 * „Allegro". Szczegóły `payment.type`/`provider` nie są przechowywane (§12.4).
 	 *
+	 * Ten sam literał „Allegro" reużywa atrybucja Origin (kontrakt §12.6, D-6.6.1,
+	 * {@see OrderWriter::apply_attribution()}) — jedno źródło stringa wyświetlanego
+	 * kupującemu/adminowi, nie duplikat.
+	 *
 	 * @return string
 	 */
 	public static function payment_title(): string {
 		return 'Allegro';
+	}
+
+	/**
+	 * `source_type` atrybucji Origin Woo (kontrakt §12.6, D-6.6.1). Rodzina meta
+	 * `_wc_order_attribution_*` jest WŁASNOŚCIĄ WooCommerce core (obca dla naszego
+	 * prefiksu `_qutlet_allegro_`) — tu tylko WARTOŚĆ, którą ustawiamy. `referral` +
+	 * {@see self::payment_title()} („Allegro") dają Origin = „Referral: Allegro"
+	 * (`OrderAttributionMeta::get_origin_label()`, WooCommerce 10.9.4). Odrzucone:
+	 * `organic` (sugeruje ruch z wyszukiwarki), `utm` (sugeruje kampanię ze śledzonymi
+	 * parametrami, których tu nie ma).
+	 */
+	public const ATTRIBUTION_SOURCE_TYPE = 'referral';
+
+	/**
+	 * Podgląd etykiety Origin, jaką ustawi {@see OrderWriter::apply_attribution()} —
+	 * WYŁĄCZNIE do logów CLI ({@see BackfillOrderAttributionCommand}), żeby komunikat
+	 * `--dry-run` nie duplikował stringa poza jednym źródłem (`referral` +
+	 * {@see self::payment_title()} → szablon `OrderAttributionMeta::get_origin_label()`
+	 * dla `source_type = referral`: „Referral: %s"). NIE jest to wywołanie realnego
+	 * kodu WooCommerce (ta klasa jest celowo bez zależności od WP) — tylko odtworzenie
+	 * tego samego formatu po naszej stronie dla spójnego komunikatu.
+	 *
+	 * @return string
+	 */
+	public static function origin_label_preview(): string {
+		return sprintf( 'Referral: %s', self::payment_title() );
 	}
 
 	/**

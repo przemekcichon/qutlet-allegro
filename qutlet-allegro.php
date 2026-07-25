@@ -156,6 +156,13 @@ function bootstrap(): void {
 		\WP_CLI::add_command( 'qutlet-allegro sync-orders', OrderSync\SyncOrdersCommand::class );
 
 		/*
+		 * P-6.6b: jednorazowy backfill atrybucji Origin „Allegro" (kontrakt §12.6,
+		 * D-6.6.2) na zamówieniach zaimportowanych PRZED tym punktem. Czysto lokalna
+		 * operacja — bez API Allegro (patrz docblock komendy).
+		 */
+		\WP_CLI::add_command( 'qutlet-allegro backfill-order-attribution', OrderSync\BackfillOrderAttributionCommand::class );
+
+		/*
 		 * Harmonogram sync-stock (D-6.G1 zrewidowane, P-6.2b): rejestracja pod tym
 		 * samym guardem co komenda — JEDYNY sposób odpalenia zdarzeń WP-Cron to
 		 * `wp cron event run`, które i tak jest procesem WP-CLI (patrz docblock

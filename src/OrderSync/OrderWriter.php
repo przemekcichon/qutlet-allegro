@@ -62,6 +62,13 @@ use WC_Product;
  *
  * Literały meta VERBATIM z kontraktu §12; klucz powiązania pozycji z produktem
  * bierzemy ze STAŁEJ core {@see AllegroLinkMeta::META_OFFER_ID} (jedno źródło prawdy).
+ *
+ * ## Order attribution „Origin" (P-6.6b, kontrakt §12.6, D-6.6.1/D-6.6.2)
+ * Osobny mechanizm Woo od `created_via` (wyżej) — rodzina meta natywna
+ * `_wc_order_attribution_*` licząca etykietę „Origin" w adminie. {@see self::apply_attribution()}
+ * ustawia ją idempotentnie (tylko gdy brak) przy KAŻDYM imporcie/przebudowie treści;
+ * {@see self::backfill_attribution()} to wariant z natychmiastowym zapisem dla
+ * jednorazowej migracji ({@see BackfillOrderAttributionCommand}, D-6.6.2).
  */
 final class OrderWriter {
 
@@ -89,6 +96,19 @@ final class OrderWriter {
 	 * Id metody dostawy Allegro na pozycji `WC_Order_Item_Shipping` (kontrakt §12.2, VERBATIM).
 	 */
 	private const META_DELIVERY_METHOD_ID = '_qutlet_allegro_delivery_method_id';
+
+	/**
+	 * Meta key rodzaju źródła atrybucji Origin (kontrakt §12.6, D-6.6.1) — natywny
+	 * prefiks WooCommerce `_wc_order_attribution_`, WŁASNOŚĆ core, NIE nasz
+	 * `_qutlet_allegro_` prefiks. Publiczny: {@see BackfillOrderAttributionCommand}
+	 * filtruje po nim zamówienia jeszcze BEZ atrybucji (`NOT EXISTS`).
+	 */
+	public const META_ATTRIBUTION_SOURCE_TYPE = '_wc_order_attribution_source_type';
+
+	/**
+	 * Meta key źródła (wartość wstawiana do etykiety Origin), jw. — kontrakt §12.6.
+	 */
+	private const META_ATTRIBUTION_UTM_SOURCE = '_wc_order_attribution_utm_source';
 
 	/**
 	 * Slug metody płatności ustawiany na zamówieniu (mapping §8c — payload nie niesie
@@ -441,6 +461,57 @@ final class OrderWriter {
 		} else {
 			$order->delete_meta_data( self::META_PICKUP_POINT );
 		}
+
+		$this->apply_attribution( $order );
+	}
+
+	/**
+	 * Ustawia atrybucję Origin „Allegro" (kontrakt §12.6, D-6.6.1) — TYLKO gdy
+	 * zamówienie jeszcze nie ma `source_type` (idempotentne; nie nadpisuje istniejącej
+	 * realnej atrybucji, gdyby kiedyś powstała inną drogą niż ten import). WooCommerce
+	 * liczy etykietę Origin z `source_type`+`utm_source`
+	 * (`OrderAttributionMeta::get_origin_label()`); `referral` +
+	 * {@see OrderMapper::payment_title()} („Allegro") dają „Referral: Allegro" — goły
+	 * napis „Allegro" bez prefiksu nieosiągalny bez globalnego filtra warunkowanego
+	 * per-zamówienie (odrzucone, kontrakt §12.6).
+	 *
+	 * Wołane z {@see self::apply_meta()} (nowe zamówienia i przebudowa treści) ORAZ
+	 * przez {@see BackfillOrderAttributionCommand::__invoke()} (D-6.6.2 — jednorazowe
+	 * uzupełnienie atrybucji na zamówieniach zaimportowanych PRZED P-6.6b).
+	 *
+	 * @param WC_Order $order Zamówienie.
+	 * @return bool Czy meta zostały ustawione (`false` = zamówienie miało już atrybucję).
+	 */
+	public function apply_attribution( WC_Order $order ): bool {
+		if ( '' !== (string) $order->get_meta( self::META_ATTRIBUTION_SOURCE_TYPE ) ) {
+			return false;
+		}
+
+		$order->update_meta_data( self::META_ATTRIBUTION_SOURCE_TYPE, OrderMapper::ATTRIBUTION_SOURCE_TYPE );
+		$order->update_meta_data( self::META_ATTRIBUTION_UTM_SOURCE, OrderMapper::payment_title() );
+
+		return true;
+	}
+
+	/**
+	 * Wariant {@see self::apply_attribution()} z natychmiastowym zapisem — dla
+	 * jednorazowego backfillu (D-6.6.2) na zamówieniach spoza bieżącego przebiegu
+	 * `upsert()`. Zapis przez {@see self::save_order()} (te same gwarancje: bez maili
+	 * transakcyjnych, bez zdjęcia stanu — choć backfill nie zmienia statusu/treści,
+	 * jeden choke-point na WSZYSTKIE zapisy w tej klasie jest bezpieczniejszy niż
+	 * wyjątek `$order->save()` wprost).
+	 *
+	 * @param WC_Order $order Zamówienie.
+	 * @return bool Czy zamówienie zostało zaktualizowane (`false` = miało już atrybucję).
+	 */
+	public function backfill_attribution( WC_Order $order ): bool {
+		if ( ! $this->apply_attribution( $order ) ) {
+			return false;
+		}
+
+		$this->save_order( $order );
+
+		return true;
 	}
 
 	/**
