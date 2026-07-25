@@ -323,24 +323,34 @@ final class CategoryReportCommand {
 	 * @return array{leaf_id:string,leaf_name:string,path:string,imported_products:int,current_product_cat:string,matched_rule_type:string,matched_rule_slug:string,status:string}
 	 */
 	public static function build_row( string $leaf_id, array $path, int $imported_count, array $current_slugs ): array {
-		$match         = CategoryMapRules::resolve( $path );
-		$expected_slug = $match['slug'] ?? CategoryMapRules::FALLBACK_SLUG;
-
 		sort( $current_slugs );
 		$current_str = array() !== $current_slugs ? implode( '|', $current_slugs ) : '(brak)';
 
+		// Ścieżka nierozwiązana: reguły NIE dało się policzyć (resolve() dostałby pustą
+		// tablicę i zawsze zwróciłby null) — pokazanie fallbacku `pozostale` jako
+		// „dopasowanej reguły" sugerowałoby wynik, którego realnie nie ma (recenzja
+		// P-6.8a). `status` sam wystarczająco sygnalizuje priorytet działania.
 		if ( array() === $path ) {
-			$status = 'nierozwiazana-sciezka';
-		} elseif ( $current_str === $expected_slug ) {
-			$status = 'ok';
-		} else {
-			$status = 'do-zmiany';
+			return array(
+				'leaf_id'             => '' !== $leaf_id ? $leaf_id : '(brak)',
+				'leaf_name'           => '(nierozwiązana)',
+				'path'                => '(nierozwiązana — uruchom z --resolve-missing)',
+				'imported_products'   => $imported_count,
+				'current_product_cat' => $current_str,
+				'matched_rule_type'   => 'n/d',
+				'matched_rule_slug'   => '',
+				'status'              => 'nierozwiazana-sciezka',
+			);
 		}
+
+		$match         = CategoryMapRules::resolve( $path );
+		$expected_slug = $match['slug'] ?? CategoryMapRules::FALLBACK_SLUG;
+		$status        = $current_str === $expected_slug ? 'ok' : 'do-zmiany';
 
 		return array(
 			'leaf_id'             => '' !== $leaf_id ? $leaf_id : '(brak)',
-			'leaf_name'           => $path[0]['name'] ?? '(nierozwiązana)',
-			'path'                => array() !== $path ? self::describe_path( $path ) : '(nierozwiązana — uruchom z --resolve-missing)',
+			'leaf_name'           => $path[0]['name'],
+			'path'                => self::describe_path( $path ),
 			'imported_products'   => $imported_count,
 			'current_product_cat' => $current_str,
 			'matched_rule_type'   => $match['type'] ?? 'brak',
@@ -370,6 +380,11 @@ final class CategoryReportCommand {
 	 * Serializuje wiersze raportu do CSV (nagłówek z kluczy pierwszego wiersza). Czysta
 	 * funkcja — `fopen`/`fputcsv` na `php://temp` to wbudowane funkcje PHP, nie WP.
 	 *
+	 * BOM UTF-8 na początku (recenzja P-6.8a): nazwy kategorii niosą polskie diakrytyki
+	 * („Pozostałe", „Słuchawki"), a to jest warsztat pod arkusz (Excel na Windows domyślnie
+	 * zgaduje CP-1250 bez BOM-a i rozjeżdża ogonki) — bez BOM-a narzędzie nie spełniałoby
+	 * własnego celu.
+	 *
 	 * @param array<int,array<string,int|string>> $rows Wiersze raportu.
 	 * @return string
 	 */
@@ -395,6 +410,6 @@ final class CategoryReportCommand {
 		$csv = stream_get_contents( $handle );
 		fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 
-		return false !== $csv ? $csv : '';
+		return "\xEF\xBB\xBF" . ( false !== $csv ? $csv : '' );
 	}
 }

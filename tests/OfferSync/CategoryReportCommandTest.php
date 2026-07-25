@@ -98,6 +98,10 @@ final class CategoryReportCommandTest extends TestCase {
 		$this->assertSame( '(nierozwiązana)', $row['leaf_name'] );
 		$this->assertSame( '(nierozwiązana — uruchom z --resolve-missing)', $row['path'] );
 		$this->assertSame( 'nierozwiazana-sciezka', $row['status'] );
+		// Reguły NIE dało się policzyć bez ścieżki — pokazanie fallbacku `pozostale` jako
+		// „dopasowanej reguły" sugerowałoby wynik, którego realnie nie ma (recenzja P-6.8a).
+		$this->assertSame( 'n/d', $row['matched_rule_type'] );
+		$this->assertSame( '', $row['matched_rule_slug'] );
 	}
 
 	public function test_build_row_empty_leaf_id_shows_placeholder(): void {
@@ -144,7 +148,16 @@ final class CategoryReportCommandTest extends TestCase {
 
 		$this->assertSame(
 			"leaf_id,status\n85166,ok\n424242,do-zmiany\n",
-			str_replace( "\r\n", "\n", $csv )
+			str_replace( "\r\n", "\n", substr( $csv, strlen( "\xEF\xBB\xBF" ) ) )
 		);
+	}
+
+	public function test_to_csv_starts_with_utf8_bom(): void {
+		// Warsztat pod arkusz (Excel): bez BOM-a polskie diakrytyki („Pozostałe") w
+		// nazwach kategorii rozjeżdżają się przy domyślnym CP-1250 (recenzja P-6.8a).
+		$csv = CategoryReportCommand::to_csv( array( array( 'leaf_name' => 'Pozostałe' ) ) );
+
+		$this->assertStringStartsWith( "\xEF\xBB\xBF", $csv );
+		$this->assertStringContainsString( 'Pozostałe', $csv );
 	}
 }
