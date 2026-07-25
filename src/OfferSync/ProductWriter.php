@@ -178,17 +178,10 @@ final class ProductWriter {
 			$warnings[] = 'Oferta bez ceny (sellingMode.price) — pominięto cenę.';
 		}
 
-		// GTIN → natywne Woo `global_unique_id` (kontrakt §10.2). Woo waliduje format
-		// i rzuca wyjątkiem — nieprawidłowy EAN nie może wywrócić całego importu.
+		// GTIN → natywne Woo `global_unique_id` (kontrakt §10.2, D-6.7.1).
 		$gtin = OfferMapper::gtin( $offer );
 
-		if ( null !== $gtin ) {
-			try {
-				$product->set_global_unique_id( $gtin );
-			} catch ( WC_Data_Exception $e ) {
-				$warnings[] = sprintf( 'GTIN „%s" odrzucony przez Woo: %s', $gtin, $e->getMessage() );
-			}
-		}
+		$this->write_gtin( $product, $gtin, $warnings );
 
 		// VAT (D-6.1.3): stawka z `taxSettings` → klasa podatkowa produktu.
 		$vat_rate = OfferMapper::vat_rate( $offer );
@@ -448,6 +441,45 @@ final class ProductWriter {
 		}
 
 		return (int) $created['term_id'];
+	}
+
+	/**
+	 * Zapisuje GTIN na produkcie z rozluźnioną unikalnością (D-6.7.1, kontrakt §10.2).
+	 * Woo domyślnie egzekwuje unikalność `global_unique_id` między produktami
+	 * (`is_existing_global_unique_id`, `class-wc-product-data-store-cpt.php:1310`) —
+	 * założenie sprzeczne z jednosztukowym outletem, gdzie ten sam model (ten sam EAN)
+	 * legalnie występuje w wielu niezależnych produktach. Filtr
+	 * `wc_product_pre_has_global_unique_id` (`wc-product-functions.php:1044-1080`)
+	 * krótko spina `wc_product_has_global_unique_id()` do wartości zwróconej z filtra —
+	 * `true` = „unikalne/OK" (pomija sprawdzenie data store, WYŁĄCZA błąd duplikatu),
+	 * `false` OZNACZAŁOBY WYMUSZENIE błędu duplikatu przy KAŻDYM zapisie GTIN (odwrotność
+	 * zamierzonego efektu — zweryfikowane bezpośrednio w źródle, sesja 2026-07-25,
+	 * koryguje odwróconą wcześniejszą wersję kontraktu §10.2/planu). Dlatego callback to
+	 * `__return_true`, NIE `__return_false`. Owinięty ściśle wokół WYŁĄCZNIE tego
+	 * wywołania (`add_filter` tuż przed, `remove_filter` w `finally`) — relaksacja
+	 * duplikatu nie przecieka poza to jedno zapisanie, niezależnie od tego, czy Woo
+	 * rzuci wyjątkiem formatu. Walidacja FORMATU GTIN (`abstract-wc-product.php:896-902`)
+	 * jest niezależna od unikalności (sprawdzana PRZED wywołaniem `wc_product_has_global_unique_id()`)
+	 * i pozostaje nienaruszona.
+	 *
+	 * @param WC_Product        $product  Produkt, na którym zapisujemy GTIN.
+	 * @param string|null       $gtin     Znormalizowany GTIN z oferty (null = brak, pomiń).
+	 * @param array<int,string> $warnings Akumulator ostrzeżeń.
+	 */
+	private function write_gtin( WC_Product $product, ?string $gtin, array &$warnings ): void {
+		if ( null === $gtin ) {
+			return;
+		}
+
+		add_filter( 'wc_product_pre_has_global_unique_id', '__return_true' );
+
+		try {
+			$product->set_global_unique_id( $gtin );
+		} catch ( WC_Data_Exception $e ) {
+			$warnings[] = sprintf( 'GTIN „%s" odrzucony przez Woo: %s', $gtin, $e->getMessage() );
+		} finally {
+			remove_filter( 'wc_product_pre_has_global_unique_id', '__return_true' );
+		}
 	}
 
 	/**

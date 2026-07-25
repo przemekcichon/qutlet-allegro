@@ -2,14 +2,20 @@
 <!--
     Harness testów jednostkowych qutlet-allegro (P-6.0, warunek wejścia FAZY 6).
 
-    Testy są BEZ SIECI i BEZ WordPressa: pokrywają czyste klasy domenowe (dziś
-    SandboxSeed\IdMap), które nie dotykają runtime WP. Bootstrap to sam autoloader
-    Composera — żadnego ładowania rdzenia WP. Gdy późniejszy punkt wprowadzi test
-    wymagający WP, dostanie osobny testsuite z własnym bootstrapem.
+    Testy są BEZ SIECI i BEZ realnego WordPressa/WooCommerce: pokrywają czyste
+    klasy domenowe (SandboxSeed\IdMap i większość reszty) ORAZ (od P-6.7b) jeden
+    wąski wycinek dotykający hooków WP/Woo (ProductWriter::write_gtin) —
+    `tests/bootstrap.php` dokłada do autoloadera Composera lekkie dublery hooków
+    WP (`tests/Stubs/wc-gtin-filter-stubs.php`), 1:1 przepisane z realnego Woo
+    ground-truth, NIE ładowanie rdzenia WP. Świadomie NIE jako composer
+    `autoload-dev` „files" — koliduje z `__return_true`/`__return_false`
+    z `php-stubs/wordpress-stubs`, którego osobno używa PHPStan. Gdy późniejszy
+    punkt wymaga PRAWDZIWEGO WP+Woo (nie dublerów), dostanie osobny testsuite
+    z własnym bootstrapem.
 -->
 <phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:noNamespaceSchemaLocation="vendor/phpunit/phpunit/phpunit.xsd"
-         bootstrap="vendor/autoload.php"
+         bootstrap="tests/bootstrap.php"
          colors="true"
          failOnWarning="true"
          failOnRisky="true"
