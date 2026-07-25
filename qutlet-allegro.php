@@ -60,6 +60,12 @@ register_deactivation_hook( __FILE__, __NAMESPACE__ . '\\Auth\\RefreshScheduler:
  */
 register_deactivation_hook( __FILE__, __NAMESPACE__ . '\\OfferSync\\StockSyncScheduler::unschedule' );
 
+/*
+ * Dezaktywacja: usuń zdarzenia WP-Cron synchronizacji zamówień (P-6.9,
+ * realizacja odłożonego D-6.3.3) — ten sam powód co wyżej.
+ */
+register_deactivation_hook( __FILE__, __NAMESPACE__ . '\\OrderSync\\OrderSyncScheduler::unschedule' );
+
 /**
  * Punkt wejścia wtyczki. Uruchamiany na `plugins_loaded`.
  *
@@ -150,8 +156,8 @@ function bootstrap(): void {
 		/*
 		 * Slice OrderSync (P-6.3b): import zamówień Allegro → natywne WC_Order.
 		 * Przyrostowy polling `GET /order/events` z własnym kursorem (kontrakt §12.3,
-		 * osobny od kursora stanów P-6.2). Wyłącznie komenda (scheduler WP-Cron to
-		 * osobny, przyszły punkt — D-6.3.3). Slot `read` (D-6.G5).
+		 * osobny od kursora stanów P-6.2). Slot `read` (D-6.G5). Auto-polling przez
+		 * harmonogram WP-Cron zarejestrowany niżej (`OrderSyncScheduler`, P-6.9).
 		 */
 		\WP_CLI::add_command( 'qutlet-allegro sync-orders', OrderSync\SyncOrdersCommand::class );
 
@@ -170,6 +176,13 @@ function bootstrap(): void {
 		 * `DISABLE_WP_CRON=true`.
 		 */
 		( new OfferSync\StockSyncScheduler() )->register();
+
+		/*
+		 * Harmonogram sync-orders (P-6.9, realizuje odłożone D-6.3.3): ten sam
+		 * powód rejestracji pod guardem `WP_CLI` co `StockSyncScheduler` wyżej —
+		 * patrz docblock `OrderSyncScheduler`.
+		 */
+		( new OrderSync\OrderSyncScheduler() )->register();
 	}
 }
 
