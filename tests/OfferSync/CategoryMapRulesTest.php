@@ -74,18 +74,20 @@ final class CategoryMapRulesTest extends TestCase {
 			),
 		);
 
-		$this->assertSame( 'smartfony', CategoryMapRules::resolve_slug( $path ) );
+		$this->assertSame( 'telefony-akcesoria', CategoryMapRules::resolve_slug( $path ) );
 	}
 
 	public function test_no_rule_returns_null_never_fallback_slug(): void {
+		// Gałąź celowo spoza tabeli (P-6.8b pokrywa realne gałęzie z raportu 120 liści) —
+		// sprawdza, że BRAK reguły zwraca null, nie kosz `pozostale` po cichu.
 		$path = array(
 			array(
-				'id'   => '260556',
-				'name' => 'Grille elektryczne',
+				'id'   => '900001',
+				'name' => 'Fikcyjny liść bez reguły',
 			),
 			array(
-				'id'   => '10',
-				'name' => 'RTV i AGD',
+				'id'   => '900000',
+				'name' => 'Fikcyjna gałąź bez reguły',
 			),
 		);
 
@@ -160,12 +162,12 @@ final class CategoryMapRulesTest extends TestCase {
 	public function test_resolve_returns_null_when_no_rule_matches(): void {
 		$path = array(
 			array(
-				'id'   => '260556',
-				'name' => 'Grille elektryczne',
+				'id'   => '900001',
+				'name' => 'Fikcyjny liść bez reguły',
 			),
 			array(
-				'id'   => '10',
-				'name' => 'RTV i AGD',
+				'id'   => '900000',
+				'name' => 'Fikcyjna gałąź bez reguły',
 			),
 		);
 
