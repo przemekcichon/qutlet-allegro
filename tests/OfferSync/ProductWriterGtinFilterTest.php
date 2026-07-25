@@ -24,9 +24,10 @@ use WC_Product;
  *
  * Harness `qutlet-allegro` jest świadomie „bez WordPressa" (phpunit.xml) —
  * `tests/Stubs/wc-gtin-filter-stubs.php` dostarcza wierny rejestr hooków WP
- * (nie mock zwracający stałe) i 1:1 przepisaną z Woo 10.9.4 logikę
- * `wc_product_has_global_unique_id()` / `WC_Product::set_global_unique_id()`
- * (ground-truth cytowany w docblocku `write_gtin()`). Metoda jest prywatna —
+ * (nie mock zwracający stałe) i przepisaną z Woo 10.9.4 (z dwiema świadomymi
+ * podmianami, patrz docblok pliku stubów) logikę `wc_product_has_global_unique_id()`
+ * / `WC_Product::set_global_unique_id()` (ground-truth cytowany w docblocku
+ * `write_gtin()`). Metoda jest prywatna —
  * wołana przez Reflection, bo cel testu to DOKŁADNIE ta dyscyplina owijania
  * filtra, nie cały `upsert()` (który wymagałby pełnego stosu WP/Woo).
  *

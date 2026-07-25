@@ -12,14 +12,19 @@
  * ustalone wartości.
  *
  * `wc_product_has_global_unique_id()` i `WC_Product::set_global_unique_id()`
- * są 1:1 przepisane z realnego Woo 10.9.4 (ground-truth, sesja 2026-07-25):
+ * są przepisane z realnego Woo 10.9.4 (ground-truth, sesja 2026-07-25) z dwiema
+ * ŚWIADOMYMI podmianami (NIE dosłowne 1:1):
  * - `wc-product-functions.php:1044-1080` (kolejność: pre-filtr → krótkie
- *   spięcie → data-store duplicate check → drugi filtr → return).
- * - `abstract-wc-product.php:892-915` (kolejność: format NAJPIERW,
- *   duplikat DOPIERO potem — niezależne sprawdzenia).
- * Jedyna świadoma podmiana: `is_existing_global_unique_id()` (realny data
- * store, SQL) zastąpiony rejestrem w `$GLOBALS['__test_wc_duplicate_gtins']`
- * (ustawianym przez test) — sama logika WOKÓŁ tego wywołania jest oryginalna.
+ *   spięcie → data-store duplicate check → drugi filtr → return) —
+ *   `is_existing_global_unique_id()` (realny data store, SQL) zastąpiony
+ *   rejestrem w `$GLOBALS['__test_wc_duplicate_gtins']` (ustawianym przez test).
+ * - `abstract-wc-product.php:892-915` (kolejność: format NAJPIERW, duplikat
+ *   DOPIERO potem — niezależne sprawdzenia) — strażnik `get_object_read()`
+ *   POMINIĘTY (dubler zawsze zachowuje się, jakby był `true`); bezpieczne dla
+ *   tego testu, bo oba sposoby tworzenia `$product` w `ProductWriter::upsert()`
+ *   (`wc_get_product()` i `new WC_Product_Simple()`) mają `object_read=true`
+ *   w momencie wywołania `set_global_unique_id()`.
+ * Poza tymi dwiema podmianami logika WOKÓŁ jest oryginalna.
  *
  * @package Qutlet\Allegro
  */
