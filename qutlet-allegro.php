@@ -154,6 +154,13 @@ function bootstrap(): void {
 		\WP_CLI::add_command( 'qutlet-allegro sync-stock', OfferSync\SyncStockCommand::class );
 
 		/*
+		 * P-6.8a: raport liści kategorii Allegro obecnych w imporcie + re-kategoryzacja
+		 * (`--apply`) istniejącego katalogu wg aktualnego `CategoryMapRules`. Warsztat
+		 * kuratora pod P-6.8b (docelowy zestaw termów `product_cat`).
+		 */
+		\WP_CLI::add_command( 'qutlet-allegro category-report', OfferSync\CategoryReportCommand::class );
+
+		/*
 		 * Slice OrderSync (P-6.3b): import zamówień Allegro → natywne WC_Order.
 		 * Przyrostowy polling `GET /order/events` z własnym kursorem (kontrakt §12.3,
 		 * osobny od kursora stanów P-6.2). Slot `read` (D-6.G5). Auto-polling przez

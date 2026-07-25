@@ -85,6 +85,20 @@ final class CategoryMapRules {
 	 * @return string|null Slug termu albo null (żadna reguła nie łapie).
 	 */
 	public static function resolve_slug( array $path ): ?string {
+		$match = self::resolve( $path );
+
+		return null !== $match ? $match['slug'] : null;
+	}
+
+	/**
+	 * Jak {@see self::resolve_slug()}, ale zwraca też TYP dopasowania (`leaf`/`branch`)
+	 * i id węzła reguły — samego sluga nie starcza raportowi kuratora (P-6.8a), który
+	 * musi pokazać, CZY to wyjątek per-liść, czy reguła gałęzi, i którego węzła.
+	 *
+	 * @param array<int,array{id:string,name:string}> $path Ścieżka liść→korzeń (mapping §7b).
+	 * @return array{slug:string,type:'leaf'|'branch',rule_id:string}|null Null = żadna reguła nie łapie.
+	 */
+	public static function resolve( array $path ): ?array {
 		if ( array() === $path ) {
 			return null;
 		}
@@ -92,13 +106,21 @@ final class CategoryMapRules {
 		$leaf_id = $path[0]['id'];
 
 		if ( isset( self::LEAF_RULES[ $leaf_id ] ) ) {
-			return self::LEAF_RULES[ $leaf_id ];
+			return array(
+				'slug'    => self::LEAF_RULES[ $leaf_id ],
+				'type'    => 'leaf',
+				'rule_id' => (string) $leaf_id,
+			);
 		}
 
 		// Od liścia w górę — pierwsze trafienie to najbliższy przodek z regułą.
 		foreach ( $path as $node ) {
 			if ( isset( self::BRANCH_RULES[ $node['id'] ] ) ) {
-				return self::BRANCH_RULES[ $node['id'] ];
+				return array(
+					'slug'    => self::BRANCH_RULES[ $node['id'] ],
+					'type'    => 'branch',
+					'rule_id' => (string) $node['id'],
+				);
 			}
 		}
 
