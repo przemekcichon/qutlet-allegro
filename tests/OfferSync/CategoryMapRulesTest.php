@@ -103,4 +103,89 @@ final class CategoryMapRulesTest extends TestCase {
 		// Slug spoza słownika dostaje czytelny fallback zamiast pustki.
 		$this->assertSame( 'Nieznany', CategoryMapRules::term_name( 'nieznany' ) );
 	}
+
+	/**
+	 * {@see CategoryMapRules::resolve()} (P-6.8a) — jak resolve_slug(), ale ujawnia TYP
+	 * dopasowania i id węzła reguły, potrzebne raportowi kuratora do rozróżnienia
+	 * wyjątku per-liść od reguły gałęzi.
+	 */
+	public function test_resolve_returns_leaf_type_for_exception(): void {
+		$path = array(
+			array(
+				'id'   => '85166',
+				'name' => 'Bezprzewodowe',
+			),
+			array(
+				'id'   => '4',
+				'name' => 'Telefony i Akcesoria',
+			),
+		);
+
+		$this->assertSame(
+			array(
+				'slug'    => 'audio',
+				'type'    => 'leaf',
+				'rule_id' => '85166',
+			),
+			CategoryMapRules::resolve( $path )
+		);
+	}
+
+	public function test_resolve_returns_branch_type_for_nearest_ancestor_rule(): void {
+		$path = array(
+			array(
+				'id'   => '999001',
+				'name' => 'Pady',
+			),
+			array(
+				'id'   => '122233',
+				'name' => 'Konsole i automaty',
+			),
+			array(
+				'id'   => '2',
+				'name' => 'Komputery',
+			),
+		);
+
+		$this->assertSame(
+			array(
+				'slug'    => 'gaming',
+				'type'    => 'branch',
+				'rule_id' => '122233',
+			),
+			CategoryMapRules::resolve( $path )
+		);
+	}
+
+	public function test_resolve_returns_null_when_no_rule_matches(): void {
+		$path = array(
+			array(
+				'id'   => '260556',
+				'name' => 'Grille elektryczne',
+			),
+			array(
+				'id'   => '10',
+				'name' => 'RTV i AGD',
+			),
+		);
+
+		$this->assertNull( CategoryMapRules::resolve( $path ) );
+	}
+
+	public function test_resolve_returns_null_for_empty_path(): void {
+		$this->assertNull( CategoryMapRules::resolve( array() ) );
+	}
+
+	public function test_resolve_slug_stays_consistent_with_resolve(): void {
+		// resolve_slug() teraz deleguje do resolve() — regresja spójności obu metod.
+		$path = array(
+			array(
+				'id'   => '4575',
+				'name' => 'Myszy',
+			),
+		);
+
+		$this->assertSame( 'peryferia', CategoryMapRules::resolve_slug( $path ) );
+		$this->assertSame( 'peryferia', CategoryMapRules::resolve( $path )['slug'] ?? null );
+	}
 }
