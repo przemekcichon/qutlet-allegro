@@ -18,8 +18,9 @@ use function WP_CLI\Utils\get_flag_value;
  * `wp qutlet-allegro sync-orders` — import ORAZ synchronizacja statusów zamówień
  * Allegro → natywne `WC_Order` (mapping §8, D-6.3.1–D-6.3.6 + P-6.5c/D-6.5.1–D-6.5.7).
  * Kierunek = TYLKO pull (D-6.5.1): slot `read`, zero zapisu do Allegro. Odpalane
- * RĘCZNIE (debug/testy); automatyczny polling (scheduler WP-Cron wzorca
- * `StockSyncScheduler`) to OSOBNY, przyszły punkt (D-6.3.3).
+ * RĘCZNIE (debug/testy) LUB automatycznie przez harmonogram WP-Cron
+ * {@see \Qutlet\Allegro\OrderSync\OrderSyncScheduler} (P-6.9, realizacja
+ * odłożonego D-6.3.3).
  *
  * ## Tor przyrostowy (kursor) — D-6.3.6 + P-6.5c
  * Przyrostowy polling `GET /order/events` z WŁASNYM kursorem
