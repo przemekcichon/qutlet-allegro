@@ -109,7 +109,7 @@ final class ProductWriter {
 	 * @param string                                   $environment   Środowisko importu (`Environment::*` — buduje `allegro_url`).
 	 * @param string                                   $category_slug Docelowy slug `product_cat` (reguła albo kosz D-6.1.2).
 	 * @param array<int,array{id:string,name:string}>  $category_path Rozwiązana ścieżka liść→korzeń (może być pusta).
-	 * @param string                                   $status        Status posta dla NOWEGO produktu (`publish`/`draft`).
+	 * @param string                                   $status        Status posta dla NOWEGO produktu (`pending`/`publish`/`draft`).
 	 * @param bool                                     $skip_images   Pominięcie side-loadu zdjęć (przebiegi próbne).
 	 * @return array{action:string,product_id:int,warnings:array<int,string>}
 	 */

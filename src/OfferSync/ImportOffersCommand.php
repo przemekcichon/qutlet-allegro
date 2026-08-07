@@ -118,8 +118,9 @@ final class ImportOffersCommand {
 	 * [--status=<status>]
 	 * : Status posta dla NOWO tworzonych produktów (istniejących nie zmienia).
 	 * ---
-	 * default: publish
+	 * default: pending
 	 * options:
+	 *   - pending
 	 *   - publish
 	 *   - draft
 	 * ---
@@ -147,10 +148,10 @@ final class ImportOffersCommand {
 		$limit        = min( self::DEFAULT_LIMIT, max( 1, (int) get_flag_value( $assoc_args, 'limit', (string) self::DEFAULT_LIMIT ) ) );
 		$max_offers   = max( 0, (int) get_flag_value( $assoc_args, 'max-offers', '0' ) );
 		$skip_images  = (bool) get_flag_value( $assoc_args, 'skip-images', false );
-		$status       = (string) get_flag_value( $assoc_args, 'status', 'publish' );
+		$status       = (string) get_flag_value( $assoc_args, 'status', 'pending' );
 
-		if ( 'publish' !== $status && 'draft' !== $status ) {
-			WP_CLI::error( sprintf( 'Nieznany status: „%s" (dozwolone: publish, draft).', $status ) );
+		if ( 'pending' !== $status && 'publish' !== $status && 'draft' !== $status ) {
+			WP_CLI::error( sprintf( 'Nieznany status: „%s" (dozwolone: pending, publish, draft).', $status ) );
 		}
 
 		$this->assert_import_dependencies();
