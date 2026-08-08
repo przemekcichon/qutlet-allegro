@@ -205,14 +205,20 @@ final class ProductWriter {
 		}
 
 		/*
-		 * Warstwa surowa (D-6.G4): verbatim JSON i OBA pola parsowane zapisujemy w tej
-		 * samej operacji, z TEJ SAMEJ zwrotki — pole parsowane nigdy nie może przeżyć
-		 * JSON-a, z którego powstało. `wp_slash()` bo `update_post_meta()` unslashuje
-		 * wejście, a verbatim ma zostać bajt-w-bajt (JSON niesie backslashe).
+		 * Warstwa surowa (D-6.G4): verbatim JSON i wszystkie pola parsowane zapisujemy
+		 * w tej samej operacji, z TEJ SAMEJ zwrotki — pole parsowane nigdy nie może
+		 * przeżyć JSON-a, z którego powstało. `wp_slash()` bo `update_post_meta()`
+		 * unslashuje wejście, a verbatim ma zostać bajt-w-bajt (JSON niesie backslashe).
 		 */
 		update_post_meta( $product_id, RawLayerMeta::META_OFFER, wp_slash( $verbatim_json ) );
 		update_post_meta( $product_id, RawLayerMeta::META_DESCRIPTION_RAW, wp_slash( OfferMapper::description_raw( $offer ) ) );
 		update_post_meta( $product_id, RawLayerMeta::META_SPECIFICATION_RAW, wp_slash( OfferMapper::specification( $offer ) ) );
+
+		// Nazwa oryginalna Allegro (P-13.2b, kontrakt §9.1) — RÓWNOLEGLE z `set_name()`
+		// (post_title) powyżej, ten sam warunek/źródło (`$name`), zapamiętana osobno.
+		if ( is_string( $name ) && '' !== $name ) {
+			update_post_meta( $product_id, RawLayerMeta::META_NAME_RAW, wp_slash( $name ) );
+		}
 
 		// Pola AllegroLink (kontrakt §10.1) — nadpisywane każdym przebiegiem.
 		update_post_meta( $product_id, AllegroLinkMeta::META_OFFER_ID, wp_slash( $offer_id ) );
