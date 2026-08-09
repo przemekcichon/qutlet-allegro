@@ -14,6 +14,7 @@ use Qutlet\Core\Pricing\DiscountRate;
 use Qutlet\Core\ProductInfo\RawLayerMeta;
 use WC_Data_Exception;
 use WC_Product;
+use WC_Product_Attribute;
 use WC_Product_Simple;
 use WC_Tax;
 
@@ -28,11 +29,17 @@ use WC_Tax;
  * - nadpisywane każdym przebiegiem (sync-owned): tytuł, stock, `_price` (formuła
  *   D-4.1.2), `cena_allegro`, `allegro_url`, `allegro_wlaczone`, GTIN, VAT,
  *   warstwa surowa (verbatim JSON + pola parsowane — W TEJ SAMEJ operacji, z tej
- *   samej zwrotki, D-6.G4), pola `AllegroLink`, kategoria, marka, zdjęcia;
+ *   samej zwrotki, D-6.G4), pola `AllegroLink`, kategoria, marka, zdjęcia,
+ *   **atrybuty WC — specyfikacja tłumaczona 1:1 z surowych parametrów Allegro**
+ *   (P-13.4a, D-13.G1 — REWIZJA wcześniejszej D-6.G4/D-5.1.1/D-5.1.2, które
+ *   kierowały specyfikację przez AI i trzymały ten sync z dala od atrybutów WC;
+ *   AI od P-13.4b przestało pisać atrybuty w ogóle, więc żadna ręczna edycja
+ *   atrybutu nie przetrwa mimo woli — dane wprost z Allegro, bez ingerencji
+ *   kuratora w grze, D-13.4a.1);
  * - ustawiane TYLKO gdy puste: `klasa_stanu` (D-6.1.4 — auto-mapa daje wartość
  *   domyślną, ręczna ocena egzemplarza nie jest nadpisywana);
- * - NIGDY nie dotykane: warstwa przerobiona (`opis`, atrybuty WC — D-6.G4),
- *   `cena_rynkowa_nowego`, `zawartosc_zestawu`, `_qutlet_stawka_rabatu`.
+ * - NIGDY nie dotykane: warstwa przerobiona (`opis` — D-6.G4), `cena_rynkowa_nowego`,
+ *   `zawartosc_zestawu`, `_qutlet_stawka_rabatu`.
  *
  * Literały meta bierzemy ze STAŁYCH klas core (twarda zależność) — jedno źródło
  * prawdy zamiast powtarzania stringów z kontraktu. Klucze pól ACF to literały
@@ -212,7 +219,18 @@ final class ProductWriter {
 		 */
 		update_post_meta( $product_id, RawLayerMeta::META_OFFER, wp_slash( $verbatim_json ) );
 		update_post_meta( $product_id, RawLayerMeta::META_DESCRIPTION_RAW, wp_slash( OfferMapper::description_raw( $offer ) ) );
-		update_post_meta( $product_id, RawLayerMeta::META_SPECIFICATION_RAW, wp_slash( OfferMapper::specification( $offer ) ) );
+
+		$specification = OfferMapper::specification( $offer );
+
+		update_post_meta( $product_id, RawLayerMeta::META_SPECIFICATION_RAW, wp_slash( $specification ) );
+
+		// Atrybuty WC (kontrakt §9.2, P-13.4a/D-13.G1) — tłumaczenie 1:1 z tej
+		// samej specyfikacji surowej, BEZ udziału AI; nadpisywane każdym przebiegiem
+		// (sync-owned, D-13.4a.1 — patrz docblock klasy). Osobny `save()`, bo
+		// `set_attributes()` nie jest częścią żadnego z pól ustawionych na `$product`
+		// przed pierwszym `save()` powyżej.
+		$product->set_attributes( self::build_attributes( $specification ) );
+		$product->save();
 
 		// Nazwa oryginalna Allegro (P-13.2b, kontrakt §9.1) — RÓWNOLEGLE z `set_name()`
 		// (post_title) powyżej, ten sam warunek/źródło (`$name`), zapamiętana osobno.
@@ -519,5 +537,43 @@ final class ProductWriter {
 		}
 
 		return $created['slug'];
+	}
+
+	/**
+	 * Buduje listę atrybutów WC (custom, per-produkt — NIE taksonomia) z par
+	 * etykieta→wartość surowej specyfikacji Allegro (P-13.4a, D-13.G1 — port
+	 * jeden-do-jednego z `Qutlet\Ai\AiRewrite\RewriteWriter::build_attributes()`,
+	 * skąd atrybuty pisała wcześniej AI zanim P-13.4b tę odpowiedzialność zabrało).
+	 * Wiersze z pustą etykietą albo wartością (po sanityzacji) są pomijane — pusty
+	 * atrybut nie niesie informacji.
+	 *
+	 * @param array<int, array{etykieta: string, wartosc: string}> $specification Pary etykieta→wartość ({@see OfferMapper::specification()}).
+	 * @return array<int, WC_Product_Attribute>
+	 */
+	private static function build_attributes( array $specification ): array {
+		$attributes = array();
+		$position   = 0;
+
+		foreach ( $specification as $row ) {
+			$label = sanitize_text_field( $row['etykieta'] );
+			$value = sanitize_text_field( $row['wartosc'] );
+
+			if ( '' === $label || '' === $value ) {
+				continue;
+			}
+
+			$attribute = new WC_Product_Attribute();
+			$attribute->set_id( 0 ); // 0 = atrybut lokalny (custom), nie taksonomia globalna.
+			$attribute->set_name( $label );
+			$attribute->set_options( array( $value ) );
+			$attribute->set_position( $position );
+			$attribute->set_visible( true );
+			$attribute->set_variation( false );
+
+			$attributes[] = $attribute;
+			++$position;
+		}
+
+		return $attributes;
 	}
 }
