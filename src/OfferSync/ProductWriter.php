@@ -228,7 +228,12 @@ final class ProductWriter {
 		// samej specyfikacji surowej, BEZ udziału AI; nadpisywane każdym przebiegiem
 		// (sync-owned, D-13.4a.1 — patrz docblock klasy). Osobny `save()`, bo
 		// `set_attributes()` nie jest częścią żadnego z pól ustawionych na `$product`
-		// przed pierwszym `save()` powyżej.
+		// przed pierwszym `save()` powyżej. UWAGA: `set_attributes()` PODMIENIA cały
+		// zestaw atrybutów produktu, nie tylko wiersze ze specyfikacji — dziś
+		// nieszkodliwe (P-13.4b: AI już nie pisze atrybutów, nic innego też), ale
+		// gdyby w przyszłości jakiś inny mechanizm zaczął dopisywać własne atrybuty
+		// WC do tych samych produktów (np. globalne atrybuty taksonomiczne do
+		// filtrowania), ten sync je bezwarunkowo skasuje przy najbliższym przebiegu.
 		$product->set_attributes( self::build_attributes( $specification ) );
 		$product->save();
 
