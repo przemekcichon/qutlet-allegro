@@ -155,6 +155,45 @@ final class OfferMapperTest extends TestCase {
 		$this->assertNull( OfferMapper::condition_class( $offer ) );
 	}
 
+	/**
+	 * D-12.1a.3/D-12.1c.1 (rewizja P-12.1c): „Nowy" mapuje się do nowej klasy
+	 * `Nowe` (kod pełne słowo, nie litera) — przeniesione z A, `Powystawowy`
+	 * zostaje w A (bez zmian, ground-truth przed rewizją mapował oba do A).
+	 */
+	public function test_condition_class_maps_nowy_to_nowe_not_a(): void {
+		$offer                              = $this->offer();
+		$offer['parameters'][0]['values'][0] = 'Nowy';
+
+		$this->assertSame( 'Nowe', OfferMapper::condition_class( $offer ) );
+	}
+
+	public function test_condition_class_powystawowy_stays_a(): void {
+		$offer                              = $this->offer();
+		$offer['parameters'][0]['values'][0] = 'Powystawowy';
+
+		$this->assertSame( 'A', OfferMapper::condition_class( $offer ) );
+	}
+
+	/**
+	 * `condition_map()` (P-12.1c) — akcesor do odczytu dla strony informacyjnej
+	 * `ConditionMapPage`; dokładna zawartość musi zostać w synchronizacji z
+	 * `docs/mapping-allegro.md` D-4.1.1 (7 wartości Allegro → 5 klas, verbatim).
+	 */
+	public function test_condition_map_exposes_current_mapping_verbatim(): void {
+		$this->assertSame(
+			array(
+				'Nowy'            => 'Nowe',
+				'Powystawowy'     => 'A',
+				'Po zwrocie'      => 'B',
+				'Używany'         => 'B',
+				'Nowy z defektem' => 'C',
+				'Uszkodzony'      => 'C',
+				'Na części'       => 'D',
+			),
+			OfferMapper::condition_map()
+		);
+	}
+
 	public function test_brand_prefers_marka_and_trims(): void {
 		$this->assertSame( 'Soundcore', OfferMapper::brand( $this->offer() ) );
 	}

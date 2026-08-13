@@ -124,6 +124,15 @@ function bootstrap(): void {
 	( new OfferSync\StockPushListener() )->register();
 
 	/*
+	 * Slice OfferSync (P-12.1c): strona informacyjna (read-only, pod menu
+	 * WooCommerce) mapowania Allegro „Stan" → nasza klasa stanu
+	 * (`OfferMapper::CONDITION_MAP`, D-4.1.1). Rejestruje własny hook
+	 * `admin_menu` — bez zależności od kolejności względem core (czyta byt
+	 * core dopiero przy renderze strony, nie przy rejestracji menu).
+	 */
+	OfferSync\ConditionMapPage::init();
+
+	/*
 	 * Slice ApiSamples (P-3.1a/P-3.2a/P-3.3a): komendy WP-CLI pobierające surowe zwrotki
 	 * Allegro do plików (materiał wejściowy dla zredagowanych próbek w meta:
 	 * P-3.1b oferty, P-3.2b kategorie, P-3.3b zamówienia). Rejestrowane WYŁĄCZNIE

@@ -24,13 +24,19 @@ final class OfferMapper {
 
 	/**
 	 * Auto-mapa Allegro „Stan" → `klasa_stanu` (D-4.1.1, tabela potwierdzona
-	 * decyzją użytkownika D-6.1.4). Klucze VERBATIM z wartości parametru `Stan`
-	 * (id 11323) w realnym snapshocie; porównanie ścisłe, case-sensitive.
+	 * decyzją użytkownika D-6.1.4; REWIZJA CZĘŚCIOWA D-12.1c.1, sesja
+	 * 2026-08-13 — `Nowy` przeniesiony z `A` do nowej klasy `Nowe`, D-12.G1).
+	 * Klucze VERBATIM z wartości parametru `Stan` (id 11323) w realnym
+	 * snapshocie; porównanie ścisłe, case-sensitive. Wartości to `kod` z bytu
+	 * {@see \Qutlet\Core\ProductCondition\ClassDefinitionsTaxonomy} — dla A-D
+	 * pojedyncza litera, dla `Nowe` pełne słowo (kod NIE jest ograniczony do
+	 * jednej litery, patrz `ClassDefinitionsTaxonomy` — pole `kod` to wolny
+	 * tekst).
 	 *
 	 * @var array<string,string>
 	 */
 	private const CONDITION_MAP = array(
-		'Nowy'            => 'A',
+		'Nowy'            => 'Nowe',
 		'Powystawowy'     => 'A',
 		'Po zwrocie'      => 'B',
 		'Używany'         => 'B',
@@ -55,7 +61,8 @@ final class OfferMapper {
 	 * `klasa_stanu` wyprowadzona z offer-level parametru „Stan" (mapping §2, D-4.1.1).
 	 *
 	 * @param array<string,mixed> $offer Pełna zwrotka oferty.
-	 * @return string|null Litera A/B/C/D albo null (brak parametru / nieznana wartość).
+	 * @return string|null Kod klasy (`A`-`D` albo `Nowe`) albo null (brak
+	 *                     parametru / nieznana wartość).
 	 */
 	public static function condition_class( array $offer ): ?string {
 		$value = self::parameter_value( self::offer_parameters( $offer ), 'Stan' );
@@ -75,6 +82,20 @@ final class OfferMapper {
 	 */
 	public static function condition_raw( array $offer ): ?string {
 		return self::parameter_value( self::offer_parameters( $offer ), 'Stan' );
+	}
+
+	/**
+	 * Bieżąca zawartość auto-mapy Allegro „Stan" → `klasa_stanu` (D-4.1.1) —
+	 * odczyt dla strony informacyjnej mapowania (P-12.1c, read-only,
+	 * {@see \Qutlet\Allegro\OfferSync\ConditionMapPage}). Ta strona jest
+	 * JEDYNYM konsumentem tego akcesora poza samą klasą — sama mapa zostaje
+	 * `private const` (D-12.1c.2: bez mechanizmu edycji, zmiana mapowania to
+	 * wciąż zmiana kodu, nie danych).
+	 *
+	 * @return array<string,string>
+	 */
+	public static function condition_map(): array {
+		return self::CONDITION_MAP;
 	}
 
 	/**
