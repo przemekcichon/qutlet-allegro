@@ -11,6 +11,7 @@ namespace Qutlet\Allegro\OfferSync;
 
 use Qutlet\Core\AllegroLink\AllegroLinkMeta;
 use Qutlet\Core\Pricing\DiscountRate;
+use Qutlet\Core\ProductCondition\ClassDefinitionsTaxonomy;
 use Qutlet\Core\ProductInfo\RawLayerMeta;
 use WC_Data_Exception;
 use WC_Product;
@@ -37,7 +38,9 @@ use WC_Tax;
  *   atrybutu nie przetrwa mimo woli — dane wprost z Allegro, bez ingerencji
  *   kuratora w grze, D-13.4a.1);
  * - ustawiane TYLKO gdy puste: `klasa_stanu` (D-6.1.4 — auto-mapa daje wartość
- *   domyślną, ręczna ocena egzemplarza nie jest nadpisywana);
+ *   domyślną, ręczna ocena egzemplarza nie jest nadpisywana; „puste" od
+ *   P-12.2b/D-12.2.4 = brak relacji z taksonomią {@see ClassDefinitionsTaxonomy},
+ *   nie pusty postmeta — patrz {@see self::upsert()});
  * - NIGDY nie dotykane: warstwa przerobiona (`opis` — D-6.G4), `cena_rynkowa_nowego`,
  *   `zawartosc_zestawu`, `_qutlet_stawka_rabatu`.
  *
@@ -67,11 +70,6 @@ final class ProductWriter {
 	 * Klucz ACF pola `klasa_stanu` (VERBATIM z `ProductConditionFields` w core).
 	 */
 	private const ACF_KEY_CONDITION = 'field_qutlet_klasa_stanu';
-
-	/**
-	 * `meta_key` (name) pola `klasa_stanu` — do odczytu bieżącej wartości.
-	 */
-	private const CONDITION_META = 'klasa_stanu';
 
 	/**
 	 * `meta_key` (name) pola `cena_allegro` — do odczytu bieżącej wartości przy
@@ -264,15 +262,26 @@ final class ProductWriter {
 			update_field( self::ACF_KEY_ALLEGRO_PRICE, $cena_allegro, $product_id );
 		}
 
-		// `klasa_stanu` (D-4.1.1/D-6.1.4): tylko gdy pole PUSTE — ręczna ocena
-		// egzemplarza jest źródłem prawdy i nie wolno jej nadpisać.
-		$current_condition = get_post_meta( $product_id, self::CONDITION_META, true );
+		// `klasa_stanu` (D-4.1.1/D-6.1.4, cutover P-12.2b): tylko gdy produkt NIE MA
+		// jeszcze relacji z taksonomią — ręczna ocena egzemplarza jest źródłem prawdy
+		// i nie wolno jej nadpisać. D-12.2.4: „puste" = brak relacji
+		// (`ClassDefinitionsTaxonomy::for_product()`, czyta przez `get_the_terms()`),
+		// NIE pusty postmeta — od P-12.2a ACF nadpisuje postmeta bezwarunkowo przy
+		// każdym zapisie ekranu edycji, więc ten literał nie jest już wiarygodny.
+		if ( null === ClassDefinitionsTaxonomy::for_product( $product_id ) ) {
+			$kod       = OfferMapper::condition_class( $offer );
+			$definicja = null !== $kod ? ClassDefinitionsTaxonomy::get( $kod ) : null;
 
-		if ( '' === $current_condition || null === $current_condition || false === $current_condition ) {
-			$condition = OfferMapper::condition_class( $offer );
-
-			if ( null !== $condition ) {
-				update_field( self::ACF_KEY_CONDITION, $condition, $product_id );
+			if ( null !== $definicja ) {
+				// Pole ACF `taxonomy` (D-12.2.1) — `update_field()` z `term_id`
+				// woła natywnie `wp_set_object_terms()` (save_terms=1), ten sam
+				// mechanizm co edycja ręczna w adminie.
+				update_field( self::ACF_KEY_CONDITION, $definicja['term_id'], $product_id );
+			} elseif ( null !== $kod ) {
+				$warnings[] = sprintf(
+					'Kod klasy stanu „%s" (auto-mapa „Stan") nie ma jeszcze zdefiniowanego termu w taksonomii „Klasy stanu" — klasa_stanu nieustawiona (pole wymagane, uzupełnij ręcznie).',
+					$kod
+				);
 			} else {
 				$warnings[] = sprintf(
 					'Nieznana wartość „Stan" („%s") — klasa_stanu nieustawiona (pole wymagane, uzupełnij ręcznie).',
