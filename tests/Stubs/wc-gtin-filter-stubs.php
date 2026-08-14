@@ -11,6 +11,13 @@
  * `remove_filter` dopasowujący callback+priorytet) — nie mockiem zwracającym
  * ustalone wartości.
  *
+ * `WC_Product` jest JEDNYM dublerem współdzielonym w całym harnessie (klasa może
+ * być zdefiniowana raz w procesie PHPUnit) — rozszerzony P-9.1d o
+ * `get_image_id()`/`set_image_id()`/`get_gallery_image_ids()`/`set_gallery_image_ids()`
+ * (proste settery/gettery na polach obiektu, BEZ logiki Woo) na potrzeby
+ * `ProductWriterManualImagesTest` (`manual_image_ids()`), bez naruszania wąskiego
+ * zakresu `set_global_unique_id()` niżej.
+ *
  * `wc_product_has_global_unique_id()` i `WC_Product::set_global_unique_id()`
  * są przepisane z realnego Woo 10.9.4 (ground-truth, sesja 2026-07-25) z dwiema
  * ŚWIADOMYMI podmianami (NIE dosłowne 1:1):
@@ -175,12 +182,38 @@ if ( ! class_exists( 'WC_Product' ) ) {
 		 */
 		private $global_unique_id = '';
 
+		/**
+		 * @var int
+		 */
+		private $image_id = 0;
+
+		/**
+		 * @var array<int,int>
+		 */
+		private $gallery_image_ids = array();
+
 		public function __construct( $id = 1 ) {
 			$this->id = $id;
 		}
 
 		public function get_id() {
 			return $this->id;
+		}
+
+		public function get_image_id() {
+			return $this->image_id;
+		}
+
+		public function set_image_id( $image_id ) {
+			$this->image_id = (int) $image_id;
+		}
+
+		public function get_gallery_image_ids() {
+			return $this->gallery_image_ids;
+		}
+
+		public function set_gallery_image_ids( array $gallery_image_ids ) {
+			$this->gallery_image_ids = array_map( 'intval', $gallery_image_ids );
 		}
 
 		public function set_global_unique_id( $global_unique_id ) {
