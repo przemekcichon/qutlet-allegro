@@ -26,21 +26,37 @@ use WC_Tax;
  * (kontrakt §10.1) — ponowny import znajduje istniejący produkt i AKTUALIZUJE go,
  * nigdy nie duplikuje.
  *
- * Podział własności pól (kto jest źródłem prawdy — kontrakt §2/§4/§9/§10/§11):
- * - nadpisywane każdym przebiegiem (sync-owned): tytuł, stock, `_price` (formuła
- *   D-4.1.2), `cena_allegro`, `allegro_url`, `allegro_wlaczone`, GTIN, VAT,
- *   warstwa surowa (verbatim JSON + pola parsowane — W TEJ SAMEJ operacji, z tej
- *   samej zwrotki, D-6.G4), pola `AllegroLink`, kategoria, marka, zdjęcia,
+ * Podział własności pól (kto jest źródłem prawdy — kontrakt §2/§4/§9/§10/§11).
+ * REWIZJA P-9.1 (zgłoszenie 2026-07-27): pierwsza wersja tego podziału nadpisywała
+ * tytuł/`allegro_wlaczone`/galerię bezwarunkowo przy KAŻDYM przebiegu, także
+ * update — gubiło to ręczne edycje admina; D-9.1a.1/D-9.1b.1/D-9.1d.1 zawężyły
+ * trzy z tych pól, jak niżej. D-9.1c.1: kategoria/marka NIE są chronione — uznane
+ * za teoretyczne ryzyko (P-6.8b: kuracja kategorii to zabieg jednorazowy), zostają
+ * w pełni sync-owned.
+ * - nadpisywane każdym przebiegiem (sync-owned): stock, `_price` (formuła
+ *   D-4.1.2), `cena_allegro`, `allegro_url`, GTIN, VAT, warstwa surowa (verbatim
+ *   JSON + pola parsowane — W TEJ SAMEJ operacji, z tej samej zwrotki, D-6.G4),
+ *   pola `AllegroLink`, kategoria, marka (D-9.1c.1 — nie chronione),
  *   **atrybuty WC — specyfikacja tłumaczona 1:1 z surowych parametrów Allegro**
  *   (P-13.4a, D-13.G1 — REWIZJA wcześniejszej D-6.G4/D-5.1.1/D-5.1.2, które
  *   kierowały specyfikację przez AI i trzymały ten sync z dala od atrybutów WC;
  *   AI od P-13.4b przestało pisać atrybuty w ogóle, więc żadna ręczna edycja
  *   atrybutu nie przetrwa mimo woli — dane wprost z Allegro, bez ingerencji
  *   kuratora w grze, D-13.4a.1);
+ * - ustawiane TYLKO przy tworzeniu (`$action === 'created'`), NIGDY przy update:
+ *   tytuł (`post_title`, D-9.1a.1/P-9.1a.1 — po utworzeniu tytuł jest redakcyjny,
+ *   ręczna edycja albo split tytuł/podnazwa przez `qutlet-ai` TitleGenerator/
+ *   Writer, P-9.1a.2; warstwa surowa `META_NAME_RAW` niżej i tak zawsze niesie
+ *   aktualną nazwę z Allegro), `allegro_wlaczone` (D-9.1b.1/P-9.1b — pełny
+ *   re-import nie włącza z powrotem kanału ręcznie wyłączonego przez kuratora);
  * - ustawiane TYLKO gdy puste: `klasa_stanu` (D-6.1.4 — auto-mapa daje wartość
  *   domyślną, ręczna ocena egzemplarza nie jest nadpisywana; „puste" od
  *   P-12.2b/D-12.2.4 = brak relacji z taksonomią {@see ClassDefinitionsTaxonomy},
  *   nie pusty postmeta — patrz {@see self::upsert()});
+ * - scalane, nie podmieniane: zdjęcia/galeria (D-9.1d.1/P-9.1d — zdjęcia z oferty
+ *   sync-owned jak dotąd, ale ręcznie dołożone przez kuratora (bez
+ *   {@see ImageSideloader::META_SOURCE_URL}) zostają dopisane na końcu, nigdy nie
+ *   znikają; patrz {@see self::manual_image_ids()});
  * - NIGDY nie dotykane: warstwa przerobiona (`opis` — D-6.G4), `cena_rynkowa_nowego`,
  *   `zawartosc_zestawu`, `_qutlet_stawka_rabatu`.
  *
@@ -151,10 +167,14 @@ final class ProductWriter {
 
 		$action = null === $existing_id ? 'created' : 'updated';
 
-		// Pola natywne (mapping §1).
+		// Pola natywne (mapping §1). `post_title` (D-9.1a.1, P-9.1a.1) TYLKO przy
+		// tworzeniu nowego produktu — po utworzeniu tytuł jest redakcyjny (ręczna
+		// edycja albo split tytuł/podnazwa przez `qutlet-ai` TitleGenerator/Writer,
+		// P-9.1a.2); pełny re-import NIE nadpisuje. Warstwa surowa (`META_NAME_RAW`
+		// niżej) i tak zawsze niesie aktualną nazwę z Allegro niezależnie od tego.
 		$name = $offer['name'] ?? null;
 
-		if ( is_string( $name ) && '' !== $name ) {
+		if ( 'created' === $action && is_string( $name ) && '' !== $name ) {
 			$product->set_name( $name );
 		}
 
@@ -254,8 +274,13 @@ final class ProductWriter {
 			delete_post_meta( $product_id, AllegroLinkMeta::META_MPN );
 		}
 
-		// Pola ACF kanału Allegro (kontrakt §4) — sync-owned.
-		update_field( self::ACF_KEY_ALLEGRO_ENABLED, 1, $product_id );
+		// Pola ACF kanału Allegro (kontrakt §4) — `allegro_url` sync-owned zawsze;
+		// `allegro_wlaczone` (D-9.1b.1) TYLKO przy tworzeniu nowego produktu — pełny
+		// re-import NIE nadpisuje ręcznego wyłączenia kanału przez kuratora (P-9.1b).
+		if ( 'created' === $action ) {
+			update_field( self::ACF_KEY_ALLEGRO_ENABLED, 1, $product_id );
+		}
+
 		update_field( self::ACF_KEY_ALLEGRO_URL, OfferMapper::offer_url( $environment, $offer_id ), $product_id );
 
 		if ( null !== $cena_allegro ) {
@@ -315,7 +340,10 @@ final class ProductWriter {
 			}
 		}
 
-		// Zdjęcia (mapping §1): images[0] → miniatura, reszta → galeria.
+		// Zdjęcia (mapping §1): images[0] → miniatura, reszta → galeria. Scalanie,
+		// nie podmiana (D-9.1d.1, P-9.1d): zdjęcia dołożone ręcznie przez kuratora
+		// (bez `ImageSideloader::META_SOURCE_URL` — nie pochodzą z URL-i oferty)
+		// zostają dopisane PO zdjęciach z oferty, nigdy nie znikają z sync-u.
 		if ( ! $skip_images ) {
 			$sync = $this->images->sync( $product_id, OfferMapper::image_urls( $offer ) );
 
@@ -326,8 +354,10 @@ final class ProductWriter {
 			$ids = $sync['attachment_ids'];
 
 			if ( array() !== $ids ) {
-				$product->set_image_id( $ids[0] );
-				$product->set_gallery_image_ids( array_slice( $ids, 1 ) );
+				$final_ids = array_merge( $ids, $this->manual_image_ids( $product, $ids ) );
+
+				$product->set_image_id( $final_ids[0] );
+				$product->set_gallery_image_ids( array_slice( $final_ids, 1 ) );
 				$product->save();
 			}
 		}
@@ -479,6 +509,46 @@ final class ProductWriter {
 		}
 
 		return (int) $created['term_id'];
+	}
+
+	/**
+	 * Zdjęcia z bieżącej galerii/miniatury produktu, które NIE pochodzą z sync-u
+	 * (D-9.1d.1, P-9.1d) — dołożone ręcznie przez kuratora wprost w adminie, więc
+	 * nie mają meta {@see ImageSideloader::META_SOURCE_URL} na załączniku. Zwracane
+	 * w bieżącej kolejności (miniatura, potem galeria), z pominięciem duplikatów i
+	 * id już obecnych w `$sync_ids` (świeżo pobrane/dopasowane z tego przebiegu).
+	 *
+	 * @param WC_Product        $product  Produkt PRZED nadpisaniem miniatury/galerii.
+	 * @param array<int,int>    $sync_ids Id załączników z tego przebiegu (w kolejności oferty).
+	 * @return array<int,int>
+	 */
+	private function manual_image_ids( WC_Product $product, array $sync_ids ): array {
+		$current = array();
+		$thumbnail_id = (int) $product->get_image_id();
+
+		if ( 0 !== $thumbnail_id ) {
+			$current[] = $thumbnail_id;
+		}
+
+		foreach ( $product->get_gallery_image_ids() as $gallery_id ) {
+			$current[] = (int) $gallery_id;
+		}
+
+		$manual = array();
+
+		foreach ( array_unique( $current ) as $attachment_id ) {
+			if ( in_array( $attachment_id, $sync_ids, true ) ) {
+				continue;
+			}
+
+			if ( '' !== get_post_meta( $attachment_id, ImageSideloader::META_SOURCE_URL, true ) ) {
+				continue;
+			}
+
+			$manual[] = $attachment_id;
+		}
+
+		return $manual;
 	}
 
 	/**
