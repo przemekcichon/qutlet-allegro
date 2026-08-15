@@ -482,6 +482,54 @@ final class ProductWriter {
 	}
 
 	/**
+	 * Zbiorczy indeks powiązanych produktów: `offer_id => product_id`, JEDNYM
+	 * zapytaniem (D-15.3, P-15.2) — dla WSZYSTKICH produktów z meta
+	 * {@see AllegroLinkMeta::META_OFFER_ID}, ten sam zestaw statusów co
+	 * {@see self::find_product_id()} ({@see self::LINK_LOOKUP_STATUSES} — w tym
+	 * `trash`, żeby wycofane oferty (D-6.2.1) NIGDY nie liczyły się jako „nowe").
+	 * Reużywane przez `--new-only` ({@see ImportOffersCommand}) do wyliczenia
+	 * różnicy z indeksem ACTIVE zamiast N osobnych wywołań `find_product_id()`.
+	 *
+	 * Duplikat klucza (więcej niż jeden produkt z tym samym `offer_id` — patrz
+	 * ostrzeżenie w {@see self::find_product_id()}) tu NIE jest sygnalizowany:
+	 * indeks służy WYŁĄCZNIE do sprawdzenia „czy offer_id jest już znany"
+	 * (obecność klucza) — który konkretnie `product_id` wygra przy duplikacie
+	 * jest nieistotne dla tego użycia.
+	 *
+	 * @return array<string,int> `offer_id => product_id`.
+	 */
+	public function known_offer_ids(): array {
+		global $wpdb;
+
+		$statuses     = self::LINK_LOOKUP_STATUSES;
+		$placeholders = implode( ', ', array_fill( 0, count( $statuses ), '%s' ) );
+
+		$sql = 'SELECT pm.meta_value AS offer_id, pm.post_id AS product_id'
+			. " FROM `{$wpdb->postmeta}` pm"
+			. " INNER JOIN `{$wpdb->posts}` p ON p.ID = pm.post_id"
+			. ' WHERE pm.meta_key = %s'
+			. " AND p.post_type = 'product'"
+			. " AND p.post_status IN ( {$placeholders} )";
+
+		$query = $wpdb->prepare( $sql, ...array_merge( array( AllegroLinkMeta::META_OFFER_ID ), $statuses ) );
+		$rows  = $wpdb->get_results( $query ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- zbiorczy odczyt bez odpowiednika w WP_Query (D-15.3); bez cache, bo to jednorazowy przebieg per import.
+
+		$index = array();
+
+		foreach ( (array) $rows as $row ) {
+			$offer_id = (string) $row->offer_id;
+
+			if ( '' === $offer_id ) {
+				continue;
+			}
+
+			$index[ $offer_id ] = (int) $row->product_id;
+		}
+
+		return $index;
+	}
+
+	/**
 	 * Zapewnia term `product_cat` o kuratorskim slugu (nazwa z tabeli reguł).
 	 *
 	 * Publiczna — tej samej logiki (utworzenie termu przy pierwszym użyciu) potrzebuje
