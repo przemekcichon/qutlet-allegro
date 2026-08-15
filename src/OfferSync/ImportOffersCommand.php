@@ -97,7 +97,14 @@ final class ImportOffersCommand {
 	 * ---
 	 *
 	 * [--offer=<id>]
-	 * : Import pojedynczej oferty o podanym id (pomija listowanie).
+	 * : Import pojedynczej oferty o podanym id (pomija listowanie). Wyklucza się z `--new-only`.
+	 *
+	 * [--new-only]
+	 * : Tani delta-check (FAZA 15, D-15.1/D-15.2): zamiast pełnej listy ACTIVE
+	 *   importuje WYŁĄCZNIE oferty ACTIVE nieobecne jeszcze w zbiorze znanych
+	 *   `offer_id` ({@see ProductWriter::known_offer_ids()}). Wykrywa TYLKO nowe
+	 *   oferty — zmiany treści już zaimportowanych wymagają pełnego przebiegu
+	 *   (bez tej flagi). Wyklucza się z `--offer`.
 	 *
 	 * [--limit=<n>]
 	 * : Rozmiar strony listy `GET /sale/offers` (1–100).
@@ -129,6 +136,7 @@ final class ImportOffersCommand {
 	 *
 	 *     wp qutlet-allegro import-offers --max-offers=5 --skip-images
 	 *     wp qutlet-allegro import-offers --environment=production --offer=18780385602
+	 *     wp qutlet-allegro import-offers --new-only --skip-images
 	 *
 	 * @param array<int,string>         $args       Argumenty pozycyjne (nieużywane).
 	 * @param array<string,string|bool> $assoc_args Flagi.
@@ -145,6 +153,7 @@ final class ImportOffersCommand {
 
 		$single_offer = get_flag_value( $assoc_args, 'offer', '' );
 		$single_offer = is_string( $single_offer ) ? trim( $single_offer ) : '';
+		$new_only     = (bool) get_flag_value( $assoc_args, 'new-only', false );
 		$limit        = min( self::DEFAULT_LIMIT, max( 1, (int) get_flag_value( $assoc_args, 'limit', (string) self::DEFAULT_LIMIT ) ) );
 		$max_offers   = max( 0, (int) get_flag_value( $assoc_args, 'max-offers', '0' ) );
 		$skip_images  = (bool) get_flag_value( $assoc_args, 'skip-images', false );
@@ -152,6 +161,12 @@ final class ImportOffersCommand {
 
 		if ( 'pending' !== $status && 'publish' !== $status && 'draft' !== $status ) {
 			WP_CLI::error( sprintf( 'Nieznany status: „%s" (dozwolone: pending, publish, draft).', $status ) );
+		}
+
+		// --new-only (delta-check, D-15.1) i --offer (pojedyncza oferta) to dwie
+		// różne strategie wyboru `$targets` — łączenie ich nie ma sensownej semantyki.
+		if ( '' !== $single_offer && $new_only ) {
+			WP_CLI::error( '--new-only i --offer wykluczają się wzajemnie.' );
 		}
 
 		$this->assert_import_dependencies();
@@ -169,28 +184,47 @@ final class ImportOffersCommand {
 		);
 		$writer   = new ProductWriter();
 
-		// Lista ofert do przetworzenia: jawna flaga --offer albo pełny indeks ACTIVE.
+		// Lista ofert do przetworzenia: jawna flaga --offer, delta-check --new-only
+		// (D-15.1/D-15.2) albo pełny indeks ACTIVE.
 		if ( '' !== $single_offer ) {
 			$targets = array( $single_offer );
 			WP_CLI::log( sprintf( 'Import pojedynczej oferty %s (%s).', $single_offer, $environment ) );
 		} else {
-			$index   = $this->offer_index( $api, $access, $limit );
-			$targets = array();
+			$index  = $this->offer_index( $api, $access, $limit );
+			$active = array();
 
 			foreach ( $index as $offer_id => $offer_status ) {
 				if ( self::STATUS_ACTIVE === $offer_status ) {
-					$targets[] = (string) $offer_id;
+					$active[] = (string) $offer_id;
 				}
 			}
 
-			WP_CLI::log(
-				sprintf(
-					'Lista: %d ofert, w tym %d ACTIVE do importu (%s).',
-					count( $index ),
-					count( $targets ),
-					$environment
-				)
-			);
+			if ( $new_only ) {
+				$known   = $writer->known_offer_ids();
+				$targets = self::diff_new_offer_ids( $active, $known );
+
+				WP_CLI::log(
+					sprintf(
+						'Lista: %d ofert, %d ACTIVE, %d znanych offer_id, %d nowych do importu (%s).',
+						count( $index ),
+						count( $active ),
+						count( $known ),
+						count( $targets ),
+						$environment
+					)
+				);
+			} else {
+				$targets = $active;
+
+				WP_CLI::log(
+					sprintf(
+						'Lista: %d ofert, w tym %d ACTIVE do importu (%s).',
+						count( $index ),
+						count( $targets ),
+						$environment
+					)
+				);
+			}
 		}
 
 		$created   = 0;
@@ -434,6 +468,29 @@ final class ImportOffersCommand {
 		}
 
 		return $index;
+	}
+
+	/**
+	 * Czysta różnica zbiorów (D-15.1/D-15.2, P-15.2): oferty `ACTIVE` nieobecne
+	 * jeszcze w znanym indeksie {@see ProductWriter::known_offer_ids()}. Bez WP,
+	 * bez efektów ubocznych — testowalna wprost (wzorzec
+	 * {@see StockSyncScheduler::plan_environments()}). Kolejność `$active_offer_ids`
+	 * zachowana w wyniku.
+	 *
+	 * @param array<int,string>  $active_offer_ids Id ofert `ACTIVE` z bieżącego indeksu ({@see self::offer_index()}).
+	 * @param array<string,int>  $known_offer_ids  Znany zbiór `offer_id => product_id` ({@see ProductWriter::known_offer_ids()}).
+	 * @return array<int,string> Podzbiór `$active_offer_ids` nieobecny w `$known_offer_ids`.
+	 */
+	public static function diff_new_offer_ids( array $active_offer_ids, array $known_offer_ids ): array {
+		$new = array();
+
+		foreach ( $active_offer_ids as $offer_id ) {
+			if ( ! array_key_exists( $offer_id, $known_offer_ids ) ) {
+				$new[] = $offer_id;
+			}
+		}
+
+		return $new;
 	}
 
 	/**
