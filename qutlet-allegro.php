@@ -66,6 +66,12 @@ register_deactivation_hook( __FILE__, __NAMESPACE__ . '\\OfferSync\\StockSyncSch
  */
 register_deactivation_hook( __FILE__, __NAMESPACE__ . '\\OrderSync\\OrderSyncScheduler::unschedule' );
 
+/*
+ * Dezaktywacja: usuń zdarzenie WP-Cron delta-checku importu ofert (P-15.3a,
+ * D-15.5) — ten sam powód co wyżej.
+ */
+register_deactivation_hook( __FILE__, __NAMESPACE__ . '\\OfferSync\\ImportOffersScheduler::unschedule' );
+
 /**
  * Punkt wejścia wtyczki. Uruchamiany na `plugins_loaded`.
  *
@@ -199,6 +205,13 @@ function bootstrap(): void {
 		 * patrz docblock `OrderSyncScheduler`.
 		 */
 		( new OrderSync\OrderSyncScheduler() )->register();
+
+		/*
+		 * Harmonogram delta-checku importu ofert (P-15.3a, D-15.5): ten sam
+		 * powód rejestracji pod guardem `WP_CLI` co schedulery wyżej — patrz
+		 * docblock `ImportOffersScheduler`.
+		 */
+		( new OfferSync\ImportOffersScheduler() )->register();
 	}
 }
 
