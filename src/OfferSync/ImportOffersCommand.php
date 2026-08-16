@@ -11,6 +11,7 @@ namespace Qutlet\Allegro\OfferSync;
 
 use Qutlet\Allegro\Auth\Environment;
 use Qutlet\Allegro\Cli\AllegroCliSupport;
+use Qutlet\Core\AllegroLink\AllegroLinkMeta;
 use WP_CLI;
 use function WP_CLI\Utils\get_flag_value;
 
@@ -106,6 +107,18 @@ final class ImportOffersCommand {
 	 *   oferty — zmiany treści już zaimportowanych wymagają pełnego przebiegu
 	 *   (bez tej flagi). Wyklucza się z `--offer`.
 	 *
+	 * [--mark-ended]
+	 * : Odwrotny delta-check (P-15.4, D-15.7/D-15.13): dla znanych `offer_id`
+	 *   ({@see ProductWriter::known_offer_ids()}), których już NIE MA w
+	 *   bieżącym indeksie ACTIVE, wyłącza kanał Allegro na powiązanym
+	 *   produkcie ({@see OfferEndedMarker::mark()}, D-15.8/D-15.9) i ustawia
+	 *   marker operacyjny; produkty w koszu są pomijane (D-15.12). Auto-reversal
+	 *   (D-15.11): gdy oferta wcześniej oznaczona jako zakończona wraca ACTIVE,
+	 *   marker jest czyszczony i kanał przywrócony. Niezależna od `--new-only`
+	 *   (obie flagi mogą współwystępować albo działać osobno), wyklucza się
+	 *   z `--offer`. Reużywa te same, już policzone zbiory — zero nowego
+	 *   kosztu zapytań do Allegro API.
+	 *
 	 * [--limit=<n>]
 	 * : Rozmiar strony listy `GET /sale/offers` (1–100).
 	 * ---
@@ -137,6 +150,7 @@ final class ImportOffersCommand {
 	 *     wp qutlet-allegro import-offers --max-offers=5 --skip-images
 	 *     wp qutlet-allegro import-offers --environment=production --offer=18780385602
 	 *     wp qutlet-allegro import-offers --new-only --skip-images
+	 *     wp qutlet-allegro import-offers --new-only --mark-ended
 	 *
 	 * @param array<int,string>         $args       Argumenty pozycyjne (nieużywane).
 	 * @param array<string,string|bool> $assoc_args Flagi.
@@ -154,6 +168,7 @@ final class ImportOffersCommand {
 		$single_offer = get_flag_value( $assoc_args, 'offer', '' );
 		$single_offer = is_string( $single_offer ) ? trim( $single_offer ) : '';
 		$new_only     = (bool) get_flag_value( $assoc_args, 'new-only', false );
+		$mark_ended   = (bool) get_flag_value( $assoc_args, 'mark-ended', false );
 		$limit        = min( self::DEFAULT_LIMIT, max( 1, (int) get_flag_value( $assoc_args, 'limit', (string) self::DEFAULT_LIMIT ) ) );
 		$max_offers   = max( 0, (int) get_flag_value( $assoc_args, 'max-offers', '0' ) );
 		$skip_images  = (bool) get_flag_value( $assoc_args, 'skip-images', false );
@@ -167,6 +182,12 @@ final class ImportOffersCommand {
 		// różne strategie wyboru `$targets` — łączenie ich nie ma sensownej semantyki.
 		if ( '' !== $single_offer && $new_only ) {
 			WP_CLI::error( '--new-only i --offer wykluczają się wzajemnie.' );
+		}
+
+		// --mark-ended (P-15.4, D-15.13) czyta indeks ACTIVE + known_offer_ids()
+		// budowane WYŁĄCZNIE w gałęzi listy — --offer pomija listowanie w ogóle.
+		if ( '' !== $single_offer && $mark_ended ) {
+			WP_CLI::error( '--mark-ended i --offer wykluczają się wzajemnie.' );
 		}
 
 		$this->assert_import_dependencies();
@@ -199,8 +220,16 @@ final class ImportOffersCommand {
 				}
 			}
 
+			// known_offer_ids() (P-15.2) liczony JEDEN raz, dzielony przez
+			// --new-only i --mark-ended (D-15.13) — obie flagi patrzą na te
+			// same dwa zbiory, tylko w przeciwnych kierunkach różnicy.
+			$known = array();
+
+			if ( $new_only || $mark_ended ) {
+				$known = $writer->known_offer_ids();
+			}
+
 			if ( $new_only ) {
-				$known   = $writer->known_offer_ids();
 				$targets = self::diff_new_offer_ids( $active, $known );
 
 				WP_CLI::log(
@@ -224,6 +253,10 @@ final class ImportOffersCommand {
 						$environment
 					)
 				);
+			}
+
+			if ( $mark_ended ) {
+				$this->process_offer_ended( $known, $active );
 			}
 		}
 
@@ -491,6 +524,94 @@ final class ImportOffersCommand {
 		}
 
 		return $new;
+	}
+
+	/**
+	 * Czysta różnica zbiorów — kierunek ODWROTNY do {@see self::diff_new_offer_ids()}
+	 * (D-15.13, P-15.4): offer_id ZNANE ({@see ProductWriter::known_offer_ids()}),
+	 * których już NIE MA w bieżącym indeksie ACTIVE — „co zniknęło". Te same
+	 * dwa, już policzone zbiory co `--new-only`, zero nowego kosztu API. Bez
+	 * WP, bez efektów ubocznych — testowalna wprost.
+	 *
+	 * Rzutowanie kluczy na string jest ŚWIADOME: PHP normalizuje klucze tablic
+	 * wyglądające jak liczby (a offer_id Allegro takie są) na `int` — bez tego
+	 * rzutu `array_keys()` zwróciłby `int`, niespójnie z resztą API tej klasy
+	 * (`$active_offer_ids`/`diff_new_offer_ids()` operują na `string`).
+	 *
+	 * @param array<string,int> $known_offer_ids  Znany zbiór `offer_id => product_id`.
+	 * @param array<int,string> $active_offer_ids Id ofert `ACTIVE` z bieżącego indeksu ({@see self::offer_index()}).
+	 * @return array<int,string> Podzbiór kluczy `$known_offer_ids` nieobecny w `$active_offer_ids`.
+	 */
+	public static function diff_ended_offer_ids( array $known_offer_ids, array $active_offer_ids ): array {
+		$active_set = array_fill_keys( $active_offer_ids, true );
+		$ended      = array();
+
+		foreach ( array_keys( $known_offer_ids ) as $offer_id ) {
+			if ( ! isset( $active_set[ $offer_id ] ) ) {
+				$ended[] = (string) $offer_id;
+			}
+		}
+
+		return $ended;
+	}
+
+	/**
+	 * Krok delta-checku „co zniknęło" (D-15.13) + auto-reversal (D-15.11) —
+	 * flaga `--mark-ended` (P-15.4). Reużywa `$known`/`$active` już policzone
+	 * wyżej w {@see self::__invoke()} — zero nowych zapytań do Allegro API.
+	 *
+	 * @param array<string,int> $known  `offer_id => product_id` ({@see ProductWriter::known_offer_ids()}).
+	 * @param array<int,string> $active Id ofert ACTIVE z bieżącego indeksu.
+	 * @return void
+	 */
+	private function process_offer_ended( array $known, array $active ): void {
+		$marked  = 0;
+		$already = 0;
+		$trashed = 0;
+
+		foreach ( self::diff_ended_offer_ids( $known, $active ) as $offer_id ) {
+			$product_id = $known[ $offer_id ];
+			$outcome    = OfferEndedMarker::mark( $product_id );
+
+			if ( 'marked' === $outcome ) {
+				++$marked;
+				WP_CLI::log( sprintf( '  %s: oferta zniknęła z ACTIVE — kanał Allegro wyłączony na produkcie %d (D-15.8/D-15.9).', $offer_id, $product_id ) );
+			} elseif ( 'already-marked' === $outcome ) {
+				++$already;
+			} else {
+				++$trashed;
+				WP_CLI::log( sprintf( '  %s: oferta zniknęła z ACTIVE, ale produkt %d w koszu (wycofany, D-6.2.1) — pomijam (D-15.12a).', $offer_id, $product_id ) );
+			}
+		}
+
+		$reversed = 0;
+
+		foreach ( OfferEndedMarker::marked_product_ids() as $product_id ) {
+			$offer_id = (string) get_post_meta( $product_id, AllegroLinkMeta::META_OFFER_ID, true );
+
+			if ( ! in_array( $offer_id, $active, true ) ) {
+				continue;
+			}
+
+			$outcome = OfferEndedMarker::reverse( $product_id );
+
+			if ( 'reversed' === $outcome ) {
+				++$reversed;
+				WP_CLI::log( sprintf( '  %s: oferta wróciła ACTIVE — kanał Allegro przywrócony na produkcie %d (D-15.11).', $offer_id, $product_id ) );
+			} elseif ( 'skipped-trashed' === $outcome ) {
+				WP_CLI::log( sprintf( '  %s: oferta wróciła ACTIVE, ale produkt %d w koszu (wycofany, D-6.2.1) — kanał NIE przywrócony (D-15.12b).', $offer_id, $product_id ) );
+			}
+		}
+
+		WP_CLI::log(
+			sprintf(
+				'Delta-check zniknięć (--mark-ended): %d nowo wyłączonych, %d już wyłączonych wcześniej, %d pominiętych (kosz), %d przywróconych.',
+				$marked,
+				$already,
+				$trashed,
+				$reversed
+			)
+		);
 	}
 
 	/**

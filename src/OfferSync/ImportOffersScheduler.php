@@ -13,8 +13,11 @@ use Qutlet\Allegro\Auth\Environment;
 use WP_CLI;
 
 /**
- * Harmonogram `import-offers --new-only` (FAZA 15, D-15.5) — cykliczne
- * dokładanie NOWYCH ofert do katalogu, bez powtarzania pełnego importu.
+ * Harmonogram `import-offers --new-only --mark-ended` (FAZA 15, D-15.5) —
+ * cykliczne dokładanie NOWYCH ofert do katalogu (bez powtarzania pełnego
+ * importu) ORAZ wygaszanie kanału Allegro na produktach, których oferta
+ * zniknęła z ACTIVE, wraz z auto-reversalem (P-15.4, D-15.7/D-15.11/D-15.13
+ * — dopisane do TEGO SAMEGO tyknięcia, patrz docblock {@see self::run()}).
  *
  * Wzorzec 1:1 z {@see \Qutlet\Allegro\OfferSync\StockSyncScheduler} /
  * {@see \Qutlet\Allegro\OrderSync\OrderSyncScheduler}: własny interwał
@@ -127,7 +130,7 @@ final class ImportOffersScheduler {
 	public static function add_schedule( array $schedules ): array {
 		$schedules[ self::SCHEDULE ] = array(
 			'interval' => self::INTERVAL_SECONDS,
-			'display'  => __( 'Co 15 minut (qutlet-allegro import-offers --new-only)', 'qutlet-allegro' ),
+			'display'  => __( 'Co 15 minut (qutlet-allegro import-offers --new-only --mark-ended)', 'qutlet-allegro' ),
 		);
 
 		return $schedules;
@@ -174,14 +177,18 @@ final class ImportOffersScheduler {
 	}
 
 	/**
-	 * Callback: delta-check importu (`import-offers --new-only`), dla obu
-	 * środowisk.
+	 * Callback: delta-check importu (`import-offers --new-only --mark-ended`),
+	 * dla obu środowisk. `--mark-ended` (P-15.4, D-15.7/D-15.13) dopisane do
+	 * TEGO SAMEGO tyknięcia — reużywa dokładnie te same zbiory ACTIVE/known
+	 * co `--new-only` (zero nowego kosztu API/crona), więc wygaszanie kanału
+	 * Allegro po zniknięciu oferty i auto-reversal (D-15.11) działają
+	 * automatycznie w tej samej kadencji 15 min, bez osobnego harmonogramu.
 	 *
 	 * @return void
 	 */
 	public function run(): void {
 		foreach ( self::configured_environments() as $environment ) {
-			self::run_command( 'wp qutlet-allegro import-offers --new-only --environment=' . $environment );
+			self::run_command( 'wp qutlet-allegro import-offers --new-only --mark-ended --environment=' . $environment );
 		}
 	}
 
