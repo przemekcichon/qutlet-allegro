@@ -69,8 +69,13 @@ final class ProductWriter {
 
 	/**
 	 * Klucz ACF pola `allegro_wlaczone` (VERBATIM z `AllegroChannelFields` w core).
+	 *
+	 * Publiczna — tego samego literału używa {@see OfferEndedMarker} (P-15.4,
+	 * D-15.9) do zapisu `allegro_wlaczone = 0`/`1` w NOWYM miejscu kodu (poza
+	 * `upsert()`, żeby nie kolidować z regułą D-9.1b.1 niżej) — jedno źródło
+	 * literału zamiast duplikowania go w drugiej klasie.
 	 */
-	private const ACF_KEY_ALLEGRO_ENABLED = 'field_qutlet_allegro_wlaczone';
+	public const ACF_KEY_ALLEGRO_ENABLED = 'field_qutlet_allegro_wlaczone';
 
 	/**
 	 * Klucz ACF pola `allegro_url` (VERBATIM z `AllegroChannelFields` w core).
