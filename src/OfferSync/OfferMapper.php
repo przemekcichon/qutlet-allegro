@@ -25,24 +25,25 @@ final class OfferMapper {
 	/**
 	 * Auto-mapa Allegro „Stan" → `klasa_stanu` (D-4.1.1, tabela potwierdzona
 	 * decyzją użytkownika D-6.1.4; REWIZJA CZĘŚCIOWA D-12.1c.1, sesja
-	 * 2026-08-13 — `Nowy` przeniesiony z `A` do nowej klasy `Nowe`, D-12.G1).
+	 * 2026-08-13 — `Nowy` przeniesiony z `A` do nowej klasy `Nowe`, D-12.G1;
+	 * REWIZJA dalsza, sesja 2026-08-17 — mapowanie dziś TOŻSAMOŚCIOWE: kod =
+	 * surowa wartość „Stan" verbatim dla wszystkich siedmiu wartości, osobne
+	 * litery/słowa-kody (`A`-`D`, `Nowe`) wycofane).
 	 * Klucze VERBATIM z wartości parametru `Stan` (id 11323) w realnym
 	 * snapshocie; porównanie ścisłe, case-sensitive. Wartości to `kod` z bytu
-	 * {@see \Qutlet\Core\ProductCondition\ClassDefinitionsTaxonomy} — dla A-D
-	 * pojedyncza litera, dla `Nowe` pełne słowo (kod NIE jest ograniczony do
-	 * jednej litery, patrz `ClassDefinitionsTaxonomy` — pole `kod` to wolny
-	 * tekst).
+	 * {@see \Qutlet\Core\ProductCondition\ClassDefinitionsTaxonomy} — pole
+	 * `kod` to wolny tekst, nieograniczony do jednej litery.
 	 *
 	 * @var array<string,string>
 	 */
 	private const CONDITION_MAP = array(
-		'Nowy'            => 'Nowe',
-		'Powystawowy'     => 'A',
+		'Nowy'            => 'Nowy',
+		'Powystawowy'     => 'Powystawowy',
 		'Po zwrocie'      => 'Po zwrocie',
-		'Używany'         => 'B',
-		'Nowy z defektem' => 'C',
+		'Używany'         => 'Używany',
+		'Nowy z defektem' => 'Nowy z defektem',
 		'Uszkodzony'      => 'Uszkodzony',
-		'Na części'       => 'D',
+		'Na części'       => 'Na części',
 	);
 
 	/**
