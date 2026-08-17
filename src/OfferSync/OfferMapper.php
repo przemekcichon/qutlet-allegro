@@ -38,10 +38,10 @@ final class OfferMapper {
 	private const CONDITION_MAP = array(
 		'Nowy'            => 'Nowe',
 		'Powystawowy'     => 'A',
-		'Po zwrocie'      => 'B',
+		'Po zwrocie'      => 'Po zwrocie',
 		'Używany'         => 'B',
 		'Nowy z defektem' => 'C',
-		'Uszkodzony'      => 'C',
+		'Uszkodzony'      => 'Uszkodzony',
 		'Na części'       => 'D',
 	);
 

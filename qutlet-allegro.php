@@ -169,6 +169,15 @@ function bootstrap(): void {
 		\WP_CLI::add_command( 'qutlet-allegro sync-stock', OfferSync\SyncStockCommand::class );
 
 		/*
+		 * P-19.1 (FAZA 19): reklasyfikacja klasy stanu na żądanie — przelicza
+		 * `klasa_stanu` już zaimportowanych produktów z surowej oferty wg
+		 * aktualnej `OfferMapper::CONDITION_MAP` (D-19.1–D-19.4). Deliberatne,
+		 * punktowe odstępstwo od D-6.1.4 (ProductWriter nie reklasyfikuje
+		 * retroaktywnie), wywoływane ręcznie przez operatora, nie automatycznie.
+		 */
+		\WP_CLI::add_command( 'qutlet-allegro reclassify-klasa-stanu', OfferSync\ReclassifyKlasaStanuCommand::class );
+
+		/*
 		 * P-6.8a: raport liści kategorii Allegro obecnych w imporcie + re-kategoryzacja
 		 * (`--apply`) istniejącego katalogu wg aktualnego `CategoryMapRules`. Warsztat
 		 * kuratora pod P-6.8b (docelowy zestaw termów `product_cat`).
