@@ -132,7 +132,7 @@ final class OfferMapperTest extends TestCase {
 	}
 
 	public function test_condition_class_maps_known_value(): void {
-		$this->assertSame( 'B', OfferMapper::condition_class( $this->offer() ) );
+		$this->assertSame( 'Używany', OfferMapper::condition_class( $this->offer() ) );
 	}
 
 	public function test_condition_class_unknown_value_returns_null_not_a_guess(): void {
@@ -156,39 +156,41 @@ final class OfferMapperTest extends TestCase {
 	}
 
 	/**
-	 * D-12.1a.3/D-12.1c.1 (rewizja P-12.1c): „Nowy" mapuje się do nowej klasy
-	 * `Nowe` (kod pełne słowo, nie litera) — przeniesione z A, `Powystawowy`
-	 * zostaje w A (bez zmian, ground-truth przed rewizją mapował oba do A).
+	 * REWIZJA dalsza względem D-12.1a.3/D-12.1c.1 (które mapowały „Nowy" na
+	 * osobną klasę `Nowe`, `Powystawowy` na literę `A`): `CONDITION_MAP` jest
+	 * dziś mapowaniem TOŻSAMOŚCIOWYM — kod = surowa wartość „Stan" verbatim,
+	 * bez osobnych liter/słów-kodów.
 	 */
-	public function test_condition_class_maps_nowy_to_nowe_not_a(): void {
+	public function test_condition_class_maps_nowy_verbatim(): void {
 		$offer                              = $this->offer();
 		$offer['parameters'][0]['values'][0] = 'Nowy';
 
-		$this->assertSame( 'Nowe', OfferMapper::condition_class( $offer ) );
+		$this->assertSame( 'Nowy', OfferMapper::condition_class( $offer ) );
 	}
 
-	public function test_condition_class_powystawowy_stays_a(): void {
+	public function test_condition_class_maps_powystawowy_verbatim(): void {
 		$offer                              = $this->offer();
 		$offer['parameters'][0]['values'][0] = 'Powystawowy';
 
-		$this->assertSame( 'A', OfferMapper::condition_class( $offer ) );
+		$this->assertSame( 'Powystawowy', OfferMapper::condition_class( $offer ) );
 	}
 
 	/**
 	 * `condition_map()` (P-12.1c) — akcesor do odczytu dla strony informacyjnej
 	 * `ConditionMapPage`; dokładna zawartość musi zostać w synchronizacji z
-	 * `docs/mapping-allegro.md` D-4.1.1 (7 wartości Allegro → 5 klas, verbatim).
+	 * `docs/mapping-allegro.md` D-4.1.1 — dziś mapowanie tożsamościowe (7
+	 * wartości Allegro → te same 7 kodów, verbatim).
 	 */
 	public function test_condition_map_exposes_current_mapping_verbatim(): void {
 		$this->assertSame(
 			array(
-				'Nowy'            => 'Nowe',
-				'Powystawowy'     => 'A',
+				'Nowy'            => 'Nowy',
+				'Powystawowy'     => 'Powystawowy',
 				'Po zwrocie'      => 'Po zwrocie',
-				'Używany'         => 'B',
-				'Nowy z defektem' => 'C',
+				'Używany'         => 'Używany',
+				'Nowy z defektem' => 'Nowy z defektem',
 				'Uszkodzony'      => 'Uszkodzony',
-				'Na części'       => 'D',
+				'Na części'       => 'Na części',
 			),
 			OfferMapper::condition_map()
 		);
