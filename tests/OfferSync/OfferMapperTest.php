@@ -184,10 +184,10 @@ final class OfferMapperTest extends TestCase {
 			array(
 				'Nowy'            => 'Nowe',
 				'Powystawowy'     => 'A',
-				'Po zwrocie'      => 'B',
+				'Po zwrocie'      => 'Po zwrocie',
 				'Używany'         => 'B',
 				'Nowy z defektem' => 'C',
-				'Uszkodzony'      => 'C',
+				'Uszkodzony'      => 'Uszkodzony',
 				'Na części'       => 'D',
 			),
 			OfferMapper::condition_map()
