@@ -88,4 +88,64 @@ final class ProductWriterAttributesTest extends TestCase {
 	public function test_empty_specification_yields_no_attributes(): void {
 		$this->assertSame( array(), $this->build_attributes( array() ) );
 	}
+
+	/**
+	 * Wywołuje prywatny `ProductWriter::apply_unit_overrides()` przez Reflection.
+	 *
+	 * @param array<int, array{etykieta: string, wartosc: string}> $specification Pary etykieta→wartość.
+	 * @param array<string, string>                                $overrides     `etykieta => "wartość jednostka"`.
+	 * @return array<int, array{etykieta: string, wartosc: string}>
+	 */
+	private function apply_unit_overrides( array $specification, array $overrides ): array {
+		$method = new ReflectionMethod( ProductWriter::class, 'apply_unit_overrides' );
+		$method->setAccessible( true );
+
+		return $method->invoke( null, $specification, $overrides );
+	}
+
+	/**
+	 * `apply_unit_overrides()` (D-21.3.1, kontrakt §16) — konsument
+	 * `OfferMapper::weight_dimension_attributes()`: nakłada wartości
+	 * przeliczone do jednostki sklepu na kopię specyfikacji, dopasowując po
+	 * etykiecie; wiersze bez override zostają nietknięte.
+	 */
+	public function test_apply_unit_overrides_replaces_matching_rows_only(): void {
+		$result = $this->apply_unit_overrides(
+			array(
+				array( 'etykieta' => 'Waga produktu', 'wartosc' => '830' ),
+				array( 'etykieta' => 'Kolor', 'wartosc' => 'Czarny' ),
+			),
+			array( 'Waga produktu' => '0.83 kg' )
+		);
+
+		$this->assertSame(
+			array(
+				array( 'etykieta' => 'Waga produktu', 'wartosc' => '0.83 kg' ),
+				array( 'etykieta' => 'Kolor', 'wartosc' => 'Czarny' ),
+			),
+			$result
+		);
+	}
+
+	public function test_apply_unit_overrides_does_not_mutate_caller_array(): void {
+		$specification = array(
+			array( 'etykieta' => 'Waga produktu', 'wartosc' => '830' ),
+		);
+
+		$this->apply_unit_overrides( $specification, array( 'Waga produktu' => '0.83 kg' ) );
+
+		$this->assertSame(
+			'830',
+			$specification[0]['wartosc'],
+			'Warstwa surowa (już zapisana do postmeta przed wywołaniem) nie może zobaczyć konwersji.'
+		);
+	}
+
+	public function test_apply_unit_overrides_empty_overrides_returns_specification_unchanged(): void {
+		$specification = array(
+			array( 'etykieta' => 'Kolor', 'wartosc' => 'Czarny' ),
+		);
+
+		$this->assertSame( $specification, $this->apply_unit_overrides( $specification, array() ) );
+	}
 }

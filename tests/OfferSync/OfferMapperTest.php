@@ -391,4 +391,117 @@ final class OfferMapperTest extends TestCase {
 		$this->assertNull( OfferMapper::environment_from_offer_url( '' ) );
 		$this->assertNull( OfferMapper::environment_from_offer_url( 'https://example.com/oferta/123' ) );
 	}
+
+	/**
+	 * Oferta bazowa {@see self::offer()} rozszerzona o parametry wagowo-wymiarowe
+	 * (D-21.3.1, kontrakt §16) — `id`/`name`/`values` VERBATIM z próbki §15
+	 * (kategoria `85166`, audio): `Waga produktu` (id `203709`, jednostka
+	 * kategorii `g`) i `Szerokość produktu` (id `223333`, jednostka `cm`) —
+	 * plus `Długość przewodu` (id `207838`, kategoria ładowarek w §15, tu
+	 * WYŁĄCZNIE jako kontrprzykład „nie jest kandydatem mimo jednostki
+	 * długości").
+	 *
+	 * @return array<string,mixed>
+	 */
+	private function offer_with_weight_dimension_params(): array {
+		$offer = $this->offer();
+
+		$offer['productSet'][0]['product']['parameters'][] = array(
+			'id'     => '203709',
+			'name'   => 'Waga produktu',
+			'values' => array( '830' ),
+		);
+		$offer['productSet'][0]['product']['parameters'][] = array(
+			'id'     => '223333',
+			'name'   => 'Szerokość produktu',
+			'values' => array( '12.5' ),
+		);
+		$offer['productSet'][0]['product']['parameters'][] = array(
+			'id'     => '207838',
+			'name'   => 'Długość przewodu',
+			'values' => array( '0.5' ),
+		);
+
+		return $offer;
+	}
+
+	public function test_weight_dimension_param_ids_finds_only_curated_candidates(): void {
+		$this->assertSame(
+			array(
+				'Waga produktu'      => '203709',
+				'Szerokość produktu' => '223333',
+			),
+			OfferMapper::weight_dimension_param_ids( $this->offer_with_weight_dimension_params() )
+		);
+	}
+
+	public function test_weight_dimension_param_ids_empty_when_offer_has_no_candidates(): void {
+		$this->assertSame( array(), OfferMapper::weight_dimension_param_ids( $this->offer() ) );
+	}
+
+	public function test_weight_dimension_attributes_converts_when_unit_differs(): void {
+		$overrides = OfferMapper::weight_dimension_attributes(
+			$this->offer_with_weight_dimension_params(),
+			array(
+				'203709' => 'g',
+				'223333' => 'cm',
+			),
+			'cm',
+			'kg'
+		);
+
+		$this->assertSame( '0.83 kg', $overrides['Waga produktu'], '830 g → 0.83 kg (sklep w kg, Allegro w g dla tego id).' );
+	}
+
+	public function test_weight_dimension_attributes_appends_unit_without_conversion_when_same(): void {
+		$overrides = OfferMapper::weight_dimension_attributes(
+			$this->offer_with_weight_dimension_params(),
+			array(
+				'203709' => 'g',
+				'223333' => 'cm',
+			),
+			'cm',
+			'kg'
+		);
+
+		$this->assertSame( '12.5 cm', $overrides['Szerokość produktu'], 'Jednostka Allegro = jednostka sklepu — bez przeliczenia, tylko dopisana etykieta.' );
+	}
+
+	public function test_weight_dimension_attributes_skips_candidate_with_unresolved_unit(): void {
+		// Słownik kategorii nie zna id `203709` (np. błąd HTTP przy pobraniu) —
+		// kandydat pomijany w wyniku, D-21.3.1 pkt 3 (degradacja, nie zgadywanie).
+		$overrides = OfferMapper::weight_dimension_attributes(
+			$this->offer_with_weight_dimension_params(),
+			array( '223333' => 'cm' ),
+			'cm',
+			'kg'
+		);
+
+		$this->assertArrayNotHasKey( 'Waga produktu', $overrides );
+		$this->assertSame( '12.5 cm', $overrides['Szerokość produktu'] );
+	}
+
+	public function test_weight_dimension_attributes_never_treats_cable_length_as_candidate(): void {
+		// Kontrprzykład §15: „Długość przewodu" (m) NIE jest kandydatem mimo
+		// jednostki długości w słowniku — nawet gdy jej id JEST rozstrzygnięty.
+		$overrides = OfferMapper::weight_dimension_attributes(
+			$this->offer_with_weight_dimension_params(),
+			array(
+				'203709' => 'g',
+				'223333' => 'cm',
+				'207838' => 'm',
+			),
+			'cm',
+			'kg'
+		);
+
+		$this->assertArrayNotHasKey( 'Długość przewodu', $overrides );
+	}
+
+	public function test_weight_dimension_attributes_empty_when_no_category_units_needed(): void {
+		$this->assertSame(
+			array(),
+			OfferMapper::weight_dimension_attributes( $this->offer(), array(), 'cm', 'kg' )
+		);
+	}
 }

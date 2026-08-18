@@ -205,6 +205,19 @@ final class ImportOffersCommand {
 		);
 		$writer   = new ProductWriter();
 
+		// Jednostki wagowo-wymiarowe (D-21.3.1, kontrakt §16): ustawienia sklepu
+		// (docelowe jednostki konwersji) + resolver słownika parametrów kategorii
+		// (transport wstrzyknięty, cache per przebieg — wzorem $resolver wyżej).
+		$dimension_unit = (string) get_option( 'woocommerce_dimension_unit', 'cm' );
+		$weight_unit    = (string) get_option( 'woocommerce_weight_unit', 'kg' );
+		$units_resolver = new CategoryParameterUnits(
+			function ( string $category_id ) use ( $api, $access ): ?array {
+				$resp = $this->get( $api . '/sale/categories/' . rawurlencode( $category_id ) . '/parameters', $access );
+
+				return 200 === $resp['status'] && is_array( $resp['data'] ) ? $resp['data'] : null;
+			}
+		);
+
 		// Lista ofert do przetworzenia: jawna flaga --offer, delta-check --new-only
 		// (D-15.1/D-15.2) albo pełny indeks ACTIVE.
 		if ( '' !== $single_offer ) {
@@ -344,7 +357,14 @@ final class ImportOffersCommand {
 				}
 			}
 
-			$result = $writer->upsert( $offer, $full['body'], $environment, $slug, $path, $status, $skip_images );
+			// Jednostki wagowo-wymiarowe (D-21.3.1): słownik parametrów kategorii
+			// odpytujemy TYLKO gdy oferta niesie choć jednego kandydata — reszta
+			// ofert (większość, bez parametrów wagi/wymiaru) nie płaci kosztu
+			// dodatkowego żądania HTTP.
+			$candidate_ids  = OfferMapper::weight_dimension_param_ids( $offer );
+			$category_units = array() === $candidate_ids ? array() : $units_resolver->units_for_category( $leaf_id );
+
+			$result = $writer->upsert( $offer, $full['body'], $environment, $slug, $path, $status, $skip_images, $category_units, $dimension_unit, $weight_unit );
 
 			foreach ( $result['warnings'] as $warning ) {
 				WP_CLI::warning( sprintf( 'Oferta %s: %s', $offer_id, $warning ) );
