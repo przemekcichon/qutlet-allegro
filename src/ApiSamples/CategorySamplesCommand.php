@@ -70,10 +70,18 @@ final class CategorySamplesCommand {
 	 * : Id kategorii do pobrania przez `GET /sale/categories/{id}` (pojedyncza).
 	 *   Domyślnie to samo id, co `--parent-id` (ten sam byt w trzech kształtach).
 	 *
+	 * [--parameter-category-ids=<ids>]
+	 * : Lista id kategorii rozdzielona przecinkami, dla których dodatkowo pobrać
+	 *   słownik parametrów `GET /sale/categories/{id}/parameters` (P-21.2a —
+	 *   ustalenie jednostek parametrów wagowo-wymiarowych po ID parametru, nie po
+	 *   nazwie). Pominięte, gdy flaga pusta/nieobecna. Wynik: jeden plik z tablicą
+	 *   `{categoryId, status, parameters}` per żądaną kategorię.
+	 *
 	 * ## EXAMPLES
 	 *
 	 *     wp qutlet-allegro sample-categories --out=/tmp/p32-raw
 	 *     wp qutlet-allegro sample-categories --out=/tmp/p32-raw --parent-id=7059 --category-id=85166
+	 *     wp qutlet-allegro sample-categories --out=/tmp/p32-raw --parameter-category-ids=85166,4575,260041
 	 *
 	 * @param array<int,string>    $args       Argumenty pozycyjne (nieużywane).
 	 * @param array<string,string> $assoc_args Flagi `--klucz=wartość`.
@@ -88,8 +96,9 @@ final class CategorySamplesCommand {
 			WP_CLI::error( 'Podaj katalog docelowy przez --out=<dir>.' );
 		}
 
-		$parent_id_flag   = (string) get_flag_value( $assoc_args, 'parent-id', '' );
-		$category_id_flag = (string) get_flag_value( $assoc_args, 'category-id', '' );
+		$parent_id_flag              = (string) get_flag_value( $assoc_args, 'parent-id', '' );
+		$category_id_flag            = (string) get_flag_value( $assoc_args, 'category-id', '' );
+		$parameter_category_ids_flag = (string) get_flag_value( $assoc_args, 'parameter-category-ids', '' );
 
 		if ( ! wp_mkdir_p( $out ) ) {
 			WP_CLI::error( sprintf( 'Nie mogę utworzyć/otworzyć katalogu docelowego: %s', $out ) );
@@ -172,7 +181,16 @@ final class CategorySamplesCommand {
 			)
 		);
 
-		// 5. Manifest — kontekst doboru (BEZ tokenów).
+		// 5. Słownik parametrów per kategoria (P-21.2a) — opcjonalny, tylko gdy flaga podana.
+		$parameters_file        = null;
+		$parameter_category_ids = array();
+
+		if ( '' !== $parameter_category_ids_flag ) {
+			$parameter_category_ids = array_filter( array_map( 'trim', explode( ',', $parameter_category_ids_flag ) ) );
+			$parameters_file        = $this->fetch_category_parameters( $out, $api, $access, $parameter_category_ids );
+		}
+
+		// 6. Manifest — kontekst doboru (BEZ tokenów).
 		$manifest = array(
 			'environment' => Environment::PRODUCTION,
 			'api_base'    => $api,
@@ -193,11 +211,60 @@ final class CategorySamplesCommand {
 				'status'      => $single_resp['status'],
 				'file'        => 200 === $single_resp['status'] ? $single_file : null,
 			),
+			'parameters'  => array(
+				'category_ids' => $parameter_category_ids,
+				'file'         => $parameters_file,
+			),
 		);
 
 		$this->write( $out . '/manifest.json', (string) wp_json_encode( $manifest, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE ) );
 
 		WP_CLI::success( sprintf( 'Zapisano surowe zwrotki kategorii do: %s', $out ) );
+	}
+
+	/**
+	 * Pobiera słownik parametrów (`GET /sale/categories/{id}/parameters`) dla każdej
+	 * podanej kategorii i zapisuje jeden plik z tablicą wyników (P-21.2a — jednostki
+	 * parametrów wagowo-wymiarowych po ID parametru, nie po nazwie, bo ta sama nazwa
+	 * bywa różnym ID w różnych kategoriach — patrz `docs/mapping-allegro.md` §4b w
+	 * `qutlet-meta`).
+	 *
+	 * @param string              $out          Katalog docelowy.
+	 * @param string              $api          Bazowy URL API (środowisko produkcja).
+	 * @param string              $access       Access token (bearer).
+	 * @param array<int,string>   $category_ids Id kategorii do odpytania.
+	 * @return string|null Nazwa zapisanego pliku (względem `$out`) albo null, gdy lista pusta.
+	 */
+	private function fetch_category_parameters( string $out, string $api, string $access, array $category_ids ): ?string {
+		if ( array() === $category_ids ) {
+			return null;
+		}
+
+		$results = array();
+
+		foreach ( $category_ids as $category_id ) {
+			$url  = $api . '/sale/categories/' . rawurlencode( $category_id ) . '/parameters';
+			$resp = $this->get( $url, $access );
+
+			$results[] = array(
+				'categoryId' => $category_id,
+				'url'        => $url,
+				'status'     => $resp['status'],
+				'parameters' => 200 === $resp['status'] ? $resp['data'] : null,
+			);
+
+			if ( 200 === $resp['status'] ) {
+				WP_CLI::log( sprintf( '  parametry kategorii %s: OK', $category_id ) );
+			} else {
+				WP_CLI::warning( sprintf( 'Parametry kategorii id=%s → HTTP %d %s', $category_id, $resp['status'], $this->error_detail( $resp ) ) );
+			}
+		}
+
+		$file = 'GET_sale-categories-id-parameters.raw.json';
+
+		$this->write( $out . '/' . $file, (string) wp_json_encode( $results, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE ) );
+
+		return $file;
 	}
 
 	/**
