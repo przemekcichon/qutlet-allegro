@@ -301,9 +301,12 @@ final class ProductWriter {
 		update_post_meta( $product_id, self::ALLEGRO_URL_META, OfferMapper::offer_url( $environment, $offer_id ) );
 
 		if ( null !== $cena_allegro ) {
-			// number_format, nie cast — jak przy $shop_str wyżej (LC_NUMERIC, recenzja P-6.1b).
-			$product->update_meta_data( self::ALLEGRO_PRICE_META, number_format( $cena_allegro, 2, '.', '' ) );
-			$product->save();
+			// Zwykły update_post_meta(), symetrycznie do allegro_url wyżej — $product
+			// już zapisany dwukrotnie powyżej (linie 232/269), doklejanie tu trzeciego
+			// pełnego $product->save() tylko dla jednej meta byłoby zbędnym kosztem
+			// (recenzja P-20.7a). number_format, nie cast — jak przy $shop_str wyżej
+			// (LC_NUMERIC, recenzja P-6.1b).
+			update_post_meta( $product_id, self::ALLEGRO_PRICE_META, number_format( $cena_allegro, 2, '.', '' ) );
 		}
 
 		// `klasa_stanu` (D-4.1.1/D-6.1.4, cutover P-12.2b): tylko gdy produkt NIE MA
