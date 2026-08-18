@@ -42,7 +42,10 @@ use WC_Tax;
  *   kierowały specyfikację przez AI i trzymały ten sync z dala od atrybutów WC;
  *   AI od P-13.4b przestało pisać atrybuty w ogóle, więc żadna ręczna edycja
  *   atrybutu nie przetrwa mimo woli — dane wprost z Allegro, bez ingerencji
- *   kuratora w grze, D-13.4a.1);
+ *   kuratora w grze, D-13.4a.1); **atrybut „Stan opakowania"** (P-21.5,
+ *   D-21.5.1, kontrakt §18) — offer-level parametr Allegro doklejony do TEGO
+ *   SAMEGO zestawu atrybutów WC, verbatim, bez tabeli mapowania (w
+ *   odróżnieniu od `klasa_stanu` niżej);
  * - ustawiane TYLKO przy tworzeniu (`$action === 'created'`), NIGDY przy update:
  *   tytuł (`post_title`, D-9.1a.1/P-9.1a.1 — po utworzeniu tytuł jest redakcyjny,
  *   ręczna edycja albo split tytuł/podnazwa przez `qutlet-ai` TitleGenerator/
@@ -97,6 +100,18 @@ final class ProductWriter {
 	 * Klucz ACF pola `klasa_stanu` (VERBATIM z `ProductConditionFields` w core).
 	 */
 	private const ACF_KEY_CONDITION = 'field_qutlet_klasa_stanu';
+
+	/**
+	 * Etykieta atrybutu WC „Stan opakowania" (P-21.5, kontrakt §18) — custom
+	 * (lokalny, `id=0`) atrybut, TEN SAM mechanizm co atrybuty wagowo-wymiarowe
+	 * (§16/§17, {@see self::build_attributes()}), ale źródło danych to
+	 * offer-level parametr Allegro ({@see OfferMapper::packaging_condition()}),
+	 * NIE `productSet[0].product.parameters[]` jak reszta specyfikacji —
+	 * dlatego doklejany jako DODATKOWY wiersz PRZED `build_attributes()`, a nie
+	 * przez `OfferMapper::specification()` samą (D-21.5.1 pkt 4: różne warstwy
+	 * parametrów, nie mieszamy).
+	 */
+	private const PACKAGING_CONDITION_LABEL = 'Stan opakowania';
 
 	/**
 	 * `meta_key` (name) pola `cena_allegro` (P-20.7a, D-20.9: zwykła nazwa, NIE
@@ -317,7 +332,15 @@ final class ProductWriter {
 		// zaczął dopisywać własne atrybuty WC do tych samych produktów (np.
 		// globalne atrybuty taksonomiczne do filtrowania), ten sync je
 		// bezwarunkowo skasuje przy najbliższym przebiegu.
-		$product->set_attributes( self::build_attributes( self::apply_unit_overrides( $specification, $unit_overrides ) ) );
+		// Stan opakowania (D-21.5.1, kontrakt §18) — offer-level parametr Allegro,
+		// doklejony jako dodatkowy wiersz atrybutu, verbatim (bez tabeli
+		// mapowania — pole czysto informacyjne, w odróżnieniu od klasa_stanu niżej).
+		$specification_for_attributes = self::append_packaging_condition(
+			self::apply_unit_overrides( $specification, $unit_overrides ),
+			OfferMapper::packaging_condition( $offer )
+		);
+
+		$product->set_attributes( self::build_attributes( $specification_for_attributes ) );
 
 		// Zapis TYLKO gdy wartość rozstrzygnięta (D-21.4.1 pkt 3) — brak
 		// kandydata (lub degradacja wszystkich kandydatów danej osi/wagi w tej
@@ -780,6 +803,33 @@ final class ProductWriter {
 				$specification[ $index ]['wartosc'] = $overrides[ $row['etykieta'] ];
 			}
 		}
+
+		return $specification;
+	}
+
+	/**
+	 * Dokleja wiersz atrybutu „Stan opakowania" (D-21.5.1, kontrakt §18) na
+	 * KOPIĘ `$specification` — analogicznie do {@see self::apply_unit_overrides()},
+	 * czysta funkcja, `$specification` przyjęta przez wartość. W odróżnieniu od
+	 * `apply_unit_overrides()` (nadpisuje ISTNIEJĄCY wiersz po etykiecie), tu
+	 * zawsze DOKŁADAMY nowy wiersz na końcu — „Stan opakowania" nie występuje w
+	 * `$specification` (inny poziom parametrów Allegro, {@see
+	 * OfferMapper::packaging_condition()} czyta offer-level, nie
+	 * `productSet[0].product.parameters[]`).
+	 *
+	 * @param array<int, array{etykieta: string, wartosc: string}> $specification Pary etykieta→wartość.
+	 * @param string|null                                          $value         Wartość „Stan opakowania" ({@see OfferMapper::packaging_condition()}), `null` = oferta bez tego parametru.
+	 * @return array<int, array{etykieta: string, wartosc: string}>
+	 */
+	private static function append_packaging_condition( array $specification, ?string $value ): array {
+		if ( null === $value ) {
+			return $specification;
+		}
+
+		$specification[] = array(
+			'etykieta' => self::PACKAGING_CONDITION_LABEL,
+			'wartosc'  => $value,
+		);
 
 		return $specification;
 	}

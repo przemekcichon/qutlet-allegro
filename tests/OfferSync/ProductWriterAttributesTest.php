@@ -150,6 +150,54 @@ final class ProductWriterAttributesTest extends TestCase {
 	}
 
 	/**
+	 * Wywołuje prywatny `ProductWriter::append_packaging_condition()` przez Reflection.
+	 *
+	 * @param array<int, array{etykieta: string, wartosc: string}> $specification Pary etykieta→wartość.
+	 * @param string|null                                          $value         Wartość „Stan opakowania".
+	 * @return array<int, array{etykieta: string, wartosc: string}>
+	 */
+	private function append_packaging_condition( array $specification, ?string $value ): array {
+		$method = new ReflectionMethod( ProductWriter::class, 'append_packaging_condition' );
+		$method->setAccessible( true );
+
+		return $method->invoke( null, $specification, $value );
+	}
+
+	/**
+	 * `append_packaging_condition()` (D-21.5.1, kontrakt §18) — dokłada nowy
+	 * wiersz „Stan opakowania" na końcu specyfikacji, verbatim (bez tabeli
+	 * mapowania, w odróżnieniu od `klasa_stanu`).
+	 */
+	public function test_append_packaging_condition_adds_row_verbatim(): void {
+		$result = $this->append_packaging_condition(
+			array( array( 'etykieta' => 'Kolor', 'wartosc' => 'Czarny' ) ),
+			'oryginalne'
+		);
+
+		$this->assertSame(
+			array(
+				array( 'etykieta' => 'Kolor', 'wartosc' => 'Czarny' ),
+				array( 'etykieta' => 'Stan opakowania', 'wartosc' => 'oryginalne' ),
+			),
+			$result
+		);
+	}
+
+	public function test_append_packaging_condition_null_value_leaves_specification_unchanged(): void {
+		$specification = array( array( 'etykieta' => 'Kolor', 'wartosc' => 'Czarny' ) );
+
+		$this->assertSame( $specification, $this->append_packaging_condition( $specification, null ) );
+	}
+
+	public function test_append_packaging_condition_does_not_mutate_caller_array(): void {
+		$specification = array( array( 'etykieta' => 'Kolor', 'wartosc' => 'Czarny' ) );
+
+		$this->append_packaging_condition( $specification, 'oryginalne' );
+
+		$this->assertCount( 1, $specification, 'Warstwa surowa (już zapisana do postmeta) nie może zobaczyć doklejonego wiersza.' );
+	}
+
+	/**
 	 * Wywołuje prywatny `ProductWriter::write_native_dimension()` przez Reflection
 	 * dla WSKAZANEGO settera (`set_weight`/`set_length`/`set_width`/`set_height`,
 	 * D-21.4.1 pkt 3) i zwraca to, co przechwycił — zamiast wołać go na realnym

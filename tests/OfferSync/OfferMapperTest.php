@@ -196,6 +196,40 @@ final class OfferMapperTest extends TestCase {
 		);
 	}
 
+	/**
+	 * `packaging_condition()` (P-21.5, kontrakt §18) — ekstrakcja offer-level
+	 * parametru „Stan opakowania" (`id 229205`), MIRROR `condition_raw()`
+	 * (`id 11323`). Wartość realna z próbki (`GET_sale-product-offers.json`).
+	 */
+	public function test_packaging_condition_reads_offer_level_parameter(): void {
+		$offer                 = $this->offer();
+		$offer['parameters'][] = array(
+			'id'     => '229205',
+			'name'   => 'Stan opakowania',
+			'values' => array( 'oryginalne' ),
+		);
+
+		$this->assertSame( 'oryginalne', OfferMapper::packaging_condition( $offer ) );
+	}
+
+	public function test_packaging_condition_returns_null_when_offer_has_no_such_parameter(): void {
+		$this->assertNull( OfferMapper::packaging_condition( $this->offer() ) );
+	}
+
+	/**
+	 * Symetrycznie do {@see self::test_condition_reads_offer_level_not_product_level_parameters()}
+	 * — „Stan opakowania" wśród parametrów PRODUKTU (inny poziom) nie może być źródłem.
+	 */
+	public function test_packaging_condition_reads_offer_level_not_product_level_parameters(): void {
+		$offer = $this->offer();
+		$offer['productSet'][0]['product']['parameters'][] = array(
+			'name'   => 'Stan opakowania',
+			'values' => array( 'oryginalne' ),
+		);
+
+		$this->assertNull( OfferMapper::packaging_condition( $offer ) );
+	}
+
 	public function test_brand_prefers_marka_and_trims(): void {
 		$this->assertSame( 'Soundcore', OfferMapper::brand( $this->offer() ) );
 	}
