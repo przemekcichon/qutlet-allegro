@@ -688,4 +688,132 @@ final class OfferMapperTest extends TestCase {
 		$this->assertSame( 12.5, $result['values']['width'], 'Zwycięzca priorytetu zdegradowany — priorytet spada na "Szerokość produktu".' );
 		$this->assertSame( array( 'Szerokość produktu z podstawą' ), $result['degraded'] );
 	}
+
+	/**
+	 * D-21.4.1 (kontrakt §17, recenzja PR): kolizja priorytetu potwierdzona na
+	 * WSZYSTKICH trzech osiach wymiarowych naraz, nie tylko `width` — realne id
+	 * z próbki §15, kategoria `260041` (akcesoria monitora), która niesie
+	 * jednocześnie warianty „produktu" i „z podstawą" dla każdej z trzech osi.
+	 */
+	public function test_native_values_prefers_base_variant_on_every_dimension_axis(): void {
+		$offer = $this->offer_with_weight_dimension_params();
+
+		$offer['productSet'][0]['product']['parameters'][] = array(
+			'id'     => '223329',
+			'name'   => 'Wysokość produktu',
+			'values' => array( '52.3' ),
+		);
+		$offer['productSet'][0]['product']['parameters'][] = array(
+			'id'     => '201321',
+			'name'   => 'Głębokość produktu',
+			'values' => array( '20' ),
+		);
+		$offer['productSet'][0]['product']['parameters'][] = array(
+			'id'     => '206642',
+			'name'   => 'Szerokość produktu z podstawą',
+			'values' => array( '61.2' ),
+		);
+		$offer['productSet'][0]['product']['parameters'][] = array(
+			'id'     => '206650',
+			'name'   => 'Wysokość produktu z podstawą',
+			'values' => array( '48.5' ),
+		);
+		$offer['productSet'][0]['product']['parameters'][] = array(
+			'id'     => '206654',
+			'name'   => 'Głębokość produktu z podstawą',
+			'values' => array( '20.02' ),
+		);
+
+		$result = OfferMapper::weight_dimension_native_values(
+			$offer,
+			array(
+				'203709' => 'g',
+				'223333' => 'cm',
+				'223329' => 'cm',
+				'201321' => 'cm',
+				'206642' => 'cm',
+				'206650' => 'cm',
+				'206654' => 'cm',
+			),
+			'cm',
+			'kg'
+		);
+
+		$this->assertSame( 61.2, $result['values']['width'], '"Szerokość produktu z podstawą" wygrywa nad "Szerokość produktu".' );
+		$this->assertSame( 48.5, $result['values']['height'], '"Wysokość produktu z podstawą" wygrywa nad "Wysokość produktu".' );
+		$this->assertSame( 20.02, $result['values']['length'], '"Głębokość produktu z podstawą" wygrywa nad "Głębokość produktu" (oś `_length` = głębokość).' );
+	}
+
+	/**
+	 * D-21.4.1 priorytet wagi — realna kolizja TRÓJSTRONNA w próbce §15,
+	 * kategoria `260041`: `Waga z podstawą` (5.59 kg), `Waga produktu` (0.15 kg),
+	 * `Waga produktu z opakowaniem jednostkowym` (8.61 kg) na TEJ SAMEJ ofercie.
+	 * Wartości rosną w kolejności zgodnej z wybranym priorytetem (recenzja PR
+	 * qutlet-meta#101 — dopisane jako ewidencja w kontrakcie §17).
+	 */
+	public function test_native_values_prefers_packaged_weight_over_base_and_bare_product(): void {
+		$offer = $this->offer();
+
+		$offer['productSet'][0]['product']['parameters'][] = array(
+			'id'     => '206662',
+			'name'   => 'Waga z podstawą',
+			'values' => array( '5.59' ),
+		);
+		$offer['productSet'][0]['product']['parameters'][] = array(
+			'id'     => '206686',
+			'name'   => 'Waga produktu',
+			'values' => array( '0.15' ),
+		);
+		$offer['productSet'][0]['product']['parameters'][] = array(
+			'id'     => '17448',
+			'name'   => 'Waga produktu z opakowaniem jednostkowym',
+			'values' => array( '8.61' ),
+		);
+
+		$result = OfferMapper::weight_dimension_native_values(
+			$offer,
+			array(
+				'206662' => 'kg',
+				'206686' => 'kg',
+				'17448'  => 'kg',
+			),
+			'cm',
+			'kg'
+		);
+
+		$this->assertSame( 8.61, $result['values']['weight'], '"Waga produktu z opakowaniem jednostkowym" wygrywa nad "Waga z podstawą" i "Waga produktu".' );
+	}
+
+	/**
+	 * D-21.4.1 priorytet wagi — kolizja w kategorii grilli (`260556`, próbka
+	 * §15): `Waga` (bez słowa „produktu", 6.9 kg) współwystępuje z `Waga
+	 * produktu z opakowaniem jednostkowym` (10.2 kg) — ta sama zwyciężająca
+	 * reguła musi działać także wobec najniżej priorytetowego kandydata `Waga`.
+	 */
+	public function test_native_values_prefers_packaged_weight_over_grill_waga(): void {
+		$offer = $this->offer();
+
+		$offer['productSet'][0]['product']['parameters'][] = array(
+			'id'     => '5253',
+			'name'   => 'Waga',
+			'values' => array( '6.9' ),
+		);
+		$offer['productSet'][0]['product']['parameters'][] = array(
+			'id'     => '17448',
+			'name'   => 'Waga produktu z opakowaniem jednostkowym',
+			'values' => array( '10.2' ),
+		);
+
+		$result = OfferMapper::weight_dimension_native_values(
+			$offer,
+			array(
+				'5253'  => 'kg',
+				'17448' => 'kg',
+			),
+			'cm',
+			'kg'
+		);
+
+		$this->assertSame( 10.2, $result['values']['weight'] );
+	}
 }
