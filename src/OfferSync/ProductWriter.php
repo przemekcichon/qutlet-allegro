@@ -58,7 +58,12 @@ use WC_Tax;
  *   {@see ImageSideloader::META_SOURCE_URL}) zostają dopisane na końcu, nigdy nie
  *   znikają; patrz {@see self::manual_image_ids()});
  * - NIGDY nie dotykane: warstwa przerobiona (`opis` — D-6.G4), `cena_rynkowa_nowego`,
- *   `zawartosc_zestawu`, `_qutlet_stawka_rabatu`.
+ *   `zawartosc_zestawu`, `_qutlet_stawka_rabatu`;
+ * - ustawiane TYLKO gdy rozstrzygnięte, nigdy zerowane: pola natywne wysyłki Woo
+ *   `_weight`/`_length`/`_width`/`_height` (D-21.4.1, kontrakt §17 —
+ *   {@see self::write_native_dimension()}) — brak kandydata (lub degradacja
+ *   wszystkich kandydatów danej osi/wagi w danej ofercie) zostawia pole
+ *   nietknięte, żeby nie skasować ręcznej korekty administratora.
  *
  * Literały meta bierzemy ze STAŁYCH klas core (twarda zależność) — jedno źródło
  * prawdy zamiast powtarzania stringów z kontraktu. Klucze pól ACF to literały
@@ -282,6 +287,22 @@ final class ProductWriter {
 			}
 		}
 
+		// Pola natywne wysyłki Woo (D-21.4.1, kontrakt §17) — te SAME dane
+		// źródłowe (parametry produktowe + słownik jednostek kategorii), osobny
+		// mechanizm resolucji: priorytet między kandydatami tej samej osi/wagi +
+		// wymóg udanej konwersji (`weight_dimension_attributes()` wyżej może
+		// zostawić wartość w oryginalnej jednostce Allegro przy degradacji —
+		// niebezpieczne dla pola bez etykiety jednostki, patrz docblock
+		// `OfferMapper::weight_dimension_native_values()`).
+		$native_dimensions = OfferMapper::weight_dimension_native_values( $offer, $category_units, $dimension_unit, $weight_unit );
+
+		foreach ( $native_dimensions['degraded'] as $param_name ) {
+			$warnings[] = sprintf(
+				'Parametr wagowo-wymiarowy „%s" ma jednostkę nierozpoznaną przez tabelę konwersji — pominięto przy zapisie do natywnego pola wysyłki (D-21.4.1).',
+				$param_name
+			);
+		}
+
 		// Atrybuty WC (kontrakt §9.2, P-13.4a/D-13.G1) — tłumaczenie 1:1 z tej
 		// samej specyfikacji surowej, BEZ udziału AI; nadpisywane każdym przebiegiem
 		// (sync-owned, D-13.4a.1 — patrz docblock klasy). Wiersze wagowo-wymiarowe
@@ -297,6 +318,18 @@ final class ProductWriter {
 		// globalne atrybuty taksonomiczne do filtrowania), ten sync je
 		// bezwarunkowo skasuje przy najbliższym przebiegu.
 		$product->set_attributes( self::build_attributes( self::apply_unit_overrides( $specification, $unit_overrides ) ) );
+
+		// Zapis TYLKO gdy wartość rozstrzygnięta (D-21.4.1 pkt 3) — brak
+		// kandydata (lub degradacja wszystkich kandydatów danej osi/wagi w tej
+		// ofercie) zostawia pole NIETKNIĘTE, żeby nie skasować ewentualnej
+		// ręcznej korekty administratora. W odróżnieniu od atrybutów WC wyżej
+		// (cały zestaw sync-owned, bezwarunkowo nadpisywany) — pole natywne to
+		// pojedynczy skalar dzielony z ręczną edycją w adminie.
+		self::write_native_dimension( $product, 'set_weight', $native_dimensions['values']['weight'] );
+		self::write_native_dimension( $product, 'set_length', $native_dimensions['values']['length'] );
+		self::write_native_dimension( $product, 'set_width', $native_dimensions['values']['width'] );
+		self::write_native_dimension( $product, 'set_height', $native_dimensions['values']['height'] );
+
 		$product->save();
 
 		// Nazwa oryginalna Allegro (P-13.2b, kontrakt §9.1) — RÓWNOLEGLE z `set_name()`
@@ -749,6 +782,28 @@ final class ProductWriter {
 		}
 
 		return $specification;
+	}
+
+	/**
+	 * Woła jeden z setterów wymiarowych (`set_weight`/`set_length`/`set_width`/
+	 * `set_height`) TYLKO gdy `$value` rozstrzygnięte (D-21.4.1 pkt 3) — `null`
+	 * zostawia pole natywne nietknięte, nie zeruje go. Formatowanie przez
+	 * `number_format`, NIE `(string)` cast: cast na PHP < 8.0 respektuje
+	 * `LC_NUMERIC` (możliwy przecinek dziesiętny), a Woo oczekuje kropki (ten
+	 * sam powód co `number_format( $shop, 2, ... )` przy cenie wyżej w tym pliku).
+	 *
+	 * @param WC_Product $product WC_Product_Simple| istniejący produkt.
+	 * @param string     $setter  Nazwa settera (`set_weight`/`set_length`/`set_width`/`set_height`).
+	 * @param float|null $value   Wartość PRZELICZONA do jednostki sklepu ({@see OfferMapper::weight_dimension_native_values()}).
+	 */
+	private static function write_native_dimension( WC_Product $product, string $setter, ?float $value ): void {
+		if ( null === $value ) {
+			return;
+		}
+
+		$formatted = rtrim( rtrim( number_format( $value, 3, '.', '' ), '0' ), '.' );
+
+		$product->{$setter}( '' === $formatted ? '0' : $formatted );
 	}
 
 	/**

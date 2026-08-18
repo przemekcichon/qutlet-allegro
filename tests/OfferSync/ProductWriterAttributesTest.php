@@ -148,4 +148,39 @@ final class ProductWriterAttributesTest extends TestCase {
 
 		$this->assertSame( $specification, $this->apply_unit_overrides( $specification, array() ) );
 	}
+
+	/**
+	 * Wywołuje prywatny `ProductWriter::write_native_dimension()` przez Reflection
+	 * i zwraca wołanie settera zamiast wywoływać je na realnym `WC_Product`
+	 * (statyczna metoda pomocnicza, testowana z podwójnym mockiem — {@see \Mockery}
+	 * niedostępny tu, więc anonimowa podklasa `WC_Product` przechwytująca wywołanie).
+	 */
+	private function write_native_dimension( ?float $value ): ?string {
+		$product = new class() extends \WC_Product {
+			public ?string $captured = null;
+
+			public function set_weight( $weight = '' ) {
+				$this->captured = '' === $weight ? null : (string) $weight;
+			}
+		};
+
+		$method = new ReflectionMethod( ProductWriter::class, 'write_native_dimension' );
+		$method->setAccessible( true );
+		$method->invoke( null, $product, 'set_weight', $value );
+
+		return $product->captured;
+	}
+
+	/**
+	 * D-21.4.1 pkt 3: `null` (kandydat nierozstrzygnięty/zdegradowany) NIE woła
+	 * settera w ogóle — pole natywne zostaje nietknięte, nie zerowane.
+	 */
+	public function test_write_native_dimension_skips_setter_when_value_is_null(): void {
+		$this->assertNull( $this->write_native_dimension( null ) );
+	}
+
+	public function test_write_native_dimension_formats_with_dot_and_trims_trailing_zeros(): void {
+		$this->assertSame( '0.83', $this->write_native_dimension( 0.83 ) );
+		$this->assertSame( '3', $this->write_native_dimension( 3.0 ), 'Wartość całkowita — bez zbędnych ".000".' );
+	}
 }

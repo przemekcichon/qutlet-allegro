@@ -53,38 +53,112 @@ final class OfferMapper {
 	private const KIND_WEIGHT    = 'weight';
 
 	/**
+	 * Osie fizyczne dla kandydatów rodzaju {@see self::KIND_DIMENSION} —
+	 * mapowanie na pola natywne Woo `_width`/`_length`/`_height` (D-21.4.1,
+	 * kontrakt §17). `AXIS_LENGTH` = głębokość (konwencja WC/kurierska:
+	 * `length` to wymiar przód-tył, NIE wysokość). Rodzaj {@see self::KIND_WEIGHT}
+	 * nie ma osi — jedno pole natywne `_weight`.
+	 */
+	private const AXIS_WIDTH  = 'width';
+	private const AXIS_HEIGHT = 'height';
+	private const AXIS_LENGTH = 'length';
+
+	/**
 	 * Kuratorska lista kandydatów na atrybuty wagowo-wymiarowe produktu/paczki
 	 * (D-21.3.1, kontrakt §16) — nazwa parametru (VERBATIM ze słownika
-	 * kategorii, §15) → rodzaj ({@see self::KIND_DIMENSION}/{@see self::KIND_WEIGHT}).
-	 * Identyfikacja kandydata jest po NAZWIE (ta lista); sama JEDNOSTKA i
-	 * przelicznik są rozstrzygane WYŁĄCZNIE przez `id` parametru ze słownika
-	 * kategorii ({@see self::weight_dimension_attributes()}) — nigdy z nazwy.
-	 * Generyczne „każdy parametr z jednostką długości/wagi” było ŚWIADOMIE
-	 * odrzucone (kontrakt §16): wciągnęłoby np. `Długość przewodu` (`m`,
-	 * kontrprzykład §15) w obróbkę zarezerwowaną dla wymiarów/wagi
-	 * PRODUKTU/PACZKI.
+	 * kategorii, §15) → `['kind' => rodzaj, 'axis' => oś|null, 'priority' => int]`
+	 * (D-21.4.1, kontrakt §17 — `axis`/`priority` konsumuje WYŁĄCZNIE
+	 * {@see self::weight_dimension_native_values()}, zapis do pól natywnych;
+	 * {@see self::weight_dimension_attributes()}, zapis do atrybutu WC, czyta
+	 * tylko `kind`, jak dotychczas). Identyfikacja kandydata jest po NAZWIE (ta
+	 * lista); sama JEDNOSTKA i przelicznik są rozstrzygane WYŁĄCZNIE przez `id`
+	 * parametru ze słownika kategorii — nigdy z nazwy. Generyczne „każdy
+	 * parametr z jednostką długości/wagi” było ŚWIADOMIE odrzucone (kontrakt
+	 * §16): wciągnęłoby np. `Długość przewodu` (`m`, kontrprzykład §15) w
+	 * obróbkę zarezerwowaną dla wymiarów/wagi PRODUKTU/PACZKI.
+	 *
+	 * `priority` — niższa liczba wygrywa, gdy oferta niesie kilka kandydatów
+	 * TEJ SAMEJ osi/wagi naraz (potwierdzona kolizja w próbce §15: kategoria
+	 * `260041` niesie jednocześnie `Szerokość produktu` i `Szerokość produktu z
+	 * podstawą`). D-21.4.1: „z podstawą” > „grilla” > „produktu” dla wymiarów
+	 * (cała bryła faktycznie pakowana wygrywa nad wymiarem gołego produktu);
+	 * dla wagi: „z opakowaniem jednostkowym” > „z podstawą” > „produktu” > „Waga”
+	 * (decyzja użytkownika — najbliższe dostępne przybliżenie wagi PRZESYŁKI,
+	 * nie produktu).
 	 *
 	 * Lista NIE jest zamknięta — 391 różnych nazw parametrów w całej próbce
 	 * ofert (mapping §4b), tu sprawdzony tylko ułamek (§15); dopisywanie
 	 * nowych nazw przy kolejnych kategoriach jest oczekiwane, wzorem
 	 * {@see self::CONDITION_MAP}.
 	 *
-	 * @var array<string,string>
+	 * @var array<string,array{kind:string,axis:?string,priority:int}>
 	 */
 	private const WEIGHT_DIMENSION_CANDIDATES = array(
-		'Szerokość produktu'                      => self::KIND_DIMENSION,
-		'Wysokość produktu'                        => self::KIND_DIMENSION,
-		'Głębokość produktu'                       => self::KIND_DIMENSION,
-		'Szerokość produktu z podstawą'            => self::KIND_DIMENSION,
-		'Wysokość produktu z podstawą'             => self::KIND_DIMENSION,
-		'Głębokość produktu z podstawą'            => self::KIND_DIMENSION,
-		'Szerokość grilla'                         => self::KIND_DIMENSION,
-		'Głębokość grilla'                         => self::KIND_DIMENSION,
-		'Wysokość grilla'                          => self::KIND_DIMENSION,
-		'Waga'                                     => self::KIND_WEIGHT,
-		'Waga produktu'                            => self::KIND_WEIGHT,
-		'Waga produktu z opakowaniem jednostkowym' => self::KIND_WEIGHT,
-		'Waga z podstawą'                          => self::KIND_WEIGHT,
+		'Szerokość produktu'                      => array(
+			'kind'     => self::KIND_DIMENSION,
+			'axis'     => self::AXIS_WIDTH,
+			'priority' => 3,
+		),
+		'Wysokość produktu'                        => array(
+			'kind'     => self::KIND_DIMENSION,
+			'axis'     => self::AXIS_HEIGHT,
+			'priority' => 3,
+		),
+		'Głębokość produktu'                       => array(
+			'kind'     => self::KIND_DIMENSION,
+			'axis'     => self::AXIS_LENGTH,
+			'priority' => 3,
+		),
+		'Szerokość produktu z podstawą'            => array(
+			'kind'     => self::KIND_DIMENSION,
+			'axis'     => self::AXIS_WIDTH,
+			'priority' => 1,
+		),
+		'Wysokość produktu z podstawą'             => array(
+			'kind'     => self::KIND_DIMENSION,
+			'axis'     => self::AXIS_HEIGHT,
+			'priority' => 1,
+		),
+		'Głębokość produktu z podstawą'            => array(
+			'kind'     => self::KIND_DIMENSION,
+			'axis'     => self::AXIS_LENGTH,
+			'priority' => 1,
+		),
+		'Szerokość grilla'                         => array(
+			'kind'     => self::KIND_DIMENSION,
+			'axis'     => self::AXIS_WIDTH,
+			'priority' => 2,
+		),
+		'Głębokość grilla'                         => array(
+			'kind'     => self::KIND_DIMENSION,
+			'axis'     => self::AXIS_LENGTH,
+			'priority' => 2,
+		),
+		'Wysokość grilla'                          => array(
+			'kind'     => self::KIND_DIMENSION,
+			'axis'     => self::AXIS_HEIGHT,
+			'priority' => 2,
+		),
+		'Waga'                                     => array(
+			'kind'     => self::KIND_WEIGHT,
+			'axis'     => null,
+			'priority' => 4,
+		),
+		'Waga produktu'                            => array(
+			'kind'     => self::KIND_WEIGHT,
+			'axis'     => null,
+			'priority' => 3,
+		),
+		'Waga produktu z opakowaniem jednostkowym' => array(
+			'kind'     => self::KIND_WEIGHT,
+			'axis'     => null,
+			'priority' => 1,
+		),
+		'Waga z podstawą'                          => array(
+			'kind'     => self::KIND_WEIGHT,
+			'axis'     => null,
+			'priority' => 2,
+		),
 	);
 
 	/**
@@ -478,7 +552,7 @@ final class OfferMapper {
 				continue;
 			}
 
-			$kind        = self::WEIGHT_DIMENSION_CANDIDATES[ $name ];
+			$kind        = self::WEIGHT_DIMENSION_CANDIDATES[ $name ]['kind'];
 			$target_unit = self::KIND_DIMENSION === $kind ? $dimension_unit : $weight_unit;
 			$table       = self::KIND_DIMENSION === $kind ? self::LENGTH_TO_CM : self::WEIGHT_TO_G;
 			$converted   = self::convert_unit( (float) $raw_value, $unit, $target_unit, $table );
@@ -496,6 +570,89 @@ final class OfferMapper {
 		}
 
 		return $result;
+	}
+
+	/**
+	 * Wartości wagowo-wymiarowe GOTOWE do zapisu w natywnych polach wysyłki Woo
+	 * (`_weight`/`_length`/`_width`/`_height`, D-21.4.1, kontrakt §17) — floaty
+	 * PO zastosowaniu priorytetu z {@see self::WEIGHT_DIMENSION_CANDIDATES} i PO
+	 * udanej konwersji do jednostki sklepu. Celowo NIE parsuje stringów z
+	 * {@see self::weight_dimension_attributes()}: w gałęzi degradacji D-21.3.1
+	 * pkt 3 (jednostka znana, ale nierozpoznana przez tabelę konwersji) ten
+	 * string niesie wartość w ORYGINALNEJ jednostce Allegro, nie sklepu —
+	 * sparsowanie samej liczby zapisałoby błędną wartość do pola bez etykiety
+	 * jednostki (D-21.4.1 pkt 2).
+	 *
+	 * Priorytet (D-21.4.1): gdy oferta niesie kilka kandydatów TEJ SAMEJ osi/wagi
+	 * naraz, wygrywa ten z niższym `priority` w {@see self::WEIGHT_DIMENSION_CANDIDATES}
+	 * — ale TYLKO spośród kandydatów z udaną konwersją; kandydat zdegradowany
+	 * (id nierozstrzygnięte w `$category_units` ALBO jednostka nierozpoznana
+	 * przez tabelę konwersji) jest pomijany w wyścigu, jakby go nie było —
+	 * priorytet spada na kolejnego kandydata tej osi.
+	 *
+	 * @param array<string,mixed>  $offer          Pełna zwrotka oferty.
+	 * @param array<string,string> $category_units `id => unit` ze słownika parametrów kategorii tej oferty.
+	 * @param string               $dimension_unit Docelowa jednostka długości (`woocommerce_dimension_unit`).
+	 * @param string               $weight_unit    Docelowa jednostka wagi (`woocommerce_weight_unit`).
+	 * @return array{
+	 *     values: array{weight: float|null, length: float|null, width: float|null, height: float|null},
+	 *     degraded: array<int,string>
+	 * } `values` — zwycięzca per pole natywne (`null`, gdy żaden kandydat tej
+	 *   osi/wagi nie ma udanej konwersji). `degraded` — nazwy kandydatów
+	 *   OBECNYCH w ofercie, których jednostka jest znana, ale nierozpoznana
+	 *   przez tabelę konwersji (D-21.4.1 pkt 3 — do zalogowania jako ostrzeżenie
+	 *   przez wołającego; kandydaci z nierozstrzygniętym `id` NIE trafiają tu,
+	 *   bo to ostrzega już istniejący mechanizm w `ProductWriter::upsert()`
+	 *   dla D-21.3.1 pkt 3).
+	 */
+	public static function weight_dimension_native_values( array $offer, array $category_units, string $dimension_unit, string $weight_unit ): array {
+		$winners  = array();
+		$degraded = array();
+
+		foreach ( self::weight_dimension_param_ids( $offer ) as $name => $id ) {
+			$unit = $category_units[ $id ] ?? null;
+
+			if ( null === $unit ) {
+				continue;
+			}
+
+			$raw_value = self::parameter_value( self::product_parameters( $offer ), $name );
+
+			if ( null === $raw_value || ! is_numeric( $raw_value ) ) {
+				continue;
+			}
+
+			$candidate   = self::WEIGHT_DIMENSION_CANDIDATES[ $name ];
+			$target_unit = self::KIND_DIMENSION === $candidate['kind'] ? $dimension_unit : $weight_unit;
+			$table       = self::KIND_DIMENSION === $candidate['kind'] ? self::LENGTH_TO_CM : self::WEIGHT_TO_G;
+			$converted   = self::convert_unit( (float) $raw_value, $unit, $target_unit, $table );
+
+			if ( null === $converted ) {
+				$degraded[] = $name;
+
+				continue;
+			}
+
+			$field = self::KIND_WEIGHT === $candidate['kind'] ? 'weight' : $candidate['axis'];
+
+			if ( ! isset( $winners[ $field ] ) || $candidate['priority'] < $winners[ $field ]['priority'] ) {
+				$winners[ $field ] = array(
+					'value'    => $converted,
+					'priority' => $candidate['priority'],
+				);
+			}
+		}
+
+		$values = array();
+
+		foreach ( array( 'weight', self::AXIS_LENGTH, self::AXIS_WIDTH, self::AXIS_HEIGHT ) as $field ) {
+			$values[ $field ] = isset( $winners[ $field ] ) ? $winners[ $field ]['value'] : null;
+		}
+
+		return array(
+			'values'   => $values,
+			'degraded' => $degraded,
+		);
 	}
 
 	/**

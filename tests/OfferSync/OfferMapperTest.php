@@ -546,4 +546,146 @@ final class OfferMapperTest extends TestCase {
 
 		$this->assertSame( '830 g', $overrides['Waga produktu'], 'Bez przeliczenia (jednostka docelowa nierozpoznana), ale z jednostką Allegro dopisaną — D-21.3.1 pkt 3.' );
 	}
+
+	/**
+	 * `weight_dimension_native_values()` (D-21.4.1, kontrakt §17) — floaty PO
+	 * konwersji, gotowe do `$product->set_weight()`/`set_length()`/`set_width()`/
+	 * `set_height()`; NIE parsuje stringów `weight_dimension_attributes()`.
+	 */
+	public function test_native_values_converts_and_maps_axes(): void {
+		$result = OfferMapper::weight_dimension_native_values(
+			$this->offer_with_weight_dimension_params(),
+			array(
+				'203709' => 'g',
+				'223333' => 'cm',
+			),
+			'cm',
+			'kg'
+		);
+
+		$this->assertSame(
+			array(
+				'weight' => 0.83,
+				'length' => null,
+				'width'  => 12.5,
+				'height' => null,
+			),
+			$result['values']
+		);
+		$this->assertSame( array(), $result['degraded'] );
+	}
+
+	public function test_native_values_empty_when_no_candidates(): void {
+		$result = OfferMapper::weight_dimension_native_values( $this->offer(), array(), 'cm', 'kg' );
+
+		$this->assertSame(
+			array(
+				'weight' => null,
+				'length' => null,
+				'width'  => null,
+				'height' => null,
+			),
+			$result['values']
+		);
+		$this->assertSame( array(), $result['degraded'] );
+	}
+
+	/**
+	 * D-21.4.1: kandydat z nierozstrzygniętym `id` w słowniku kategorii jest
+	 * pominięty W WYŚCIGU (jakby go nie było) — inaczej niż `degraded`, który
+	 * niesie TYLKO kandydatów ze ZNANĄ, ale nierozpoznaną przez tabelę konwersji
+	 * jednostką (patrz kolejny test); ten przypadek jest już zgłaszany przez
+	 * istniejący mechanizm ostrzeżeń w `ProductWriter::upsert()` dla D-21.3.1 pkt 3.
+	 */
+	public function test_native_values_skips_candidate_with_unresolved_unit_without_marking_degraded(): void {
+		$result = OfferMapper::weight_dimension_native_values(
+			$this->offer_with_weight_dimension_params(),
+			array( '223333' => 'cm' ),
+			'cm',
+			'kg'
+		);
+
+		$this->assertNull( $result['values']['weight'] );
+		$this->assertSame( 12.5, $result['values']['width'] );
+		$this->assertSame( array(), $result['degraded'], 'id nierozstrzygnięty w słowniku — pomijany bez oznaczenia jako degraded.' );
+	}
+
+	/**
+	 * D-21.4.1 pkt 2: jednostka ZNANA, ale nierozpoznana przez tabelę konwersji —
+	 * kandydat NIE MOŻE zasilić pola natywnego (wartość byłaby w oryginalnej
+	 * jednostce Allegro, nie sklepu) — trafia do `degraded`, wynikowe pole zostaje
+	 * `null`.
+	 */
+	public function test_native_values_marks_degraded_when_target_unit_unrecognized(): void {
+		$result = OfferMapper::weight_dimension_native_values(
+			$this->offer_with_weight_dimension_params(),
+			array(
+				'203709' => 'g',
+				'223333' => 'cm',
+			),
+			'cm',
+			'stone'
+		);
+
+		$this->assertNull( $result['values']['weight'] );
+		$this->assertSame( array( 'Waga produktu' ), $result['degraded'] );
+	}
+
+	/**
+	 * D-21.4.1: priorytet — „Szerokość produktu z podstawą” (priority 1) wygrywa
+	 * nad „Szerokość produktu” (priority 3) na TEJ SAMEJ osi `width`, gdy oferta
+	 * niesie oba naraz (realna kolizja w próbce §15, kategoria `260041`).
+	 */
+	public function test_native_values_prefers_base_variant_over_bare_product_on_same_axis(): void {
+		$offer = $this->offer_with_weight_dimension_params();
+
+		$offer['productSet'][0]['product']['parameters'][] = array(
+			'id'     => '206642',
+			'name'   => 'Szerokość produktu z podstawą',
+			'values' => array( '20.0' ),
+		);
+
+		$result = OfferMapper::weight_dimension_native_values(
+			$offer,
+			array(
+				'203709' => 'g',
+				'223333' => 'cm',
+				'206642' => 'cm',
+			),
+			'cm',
+			'kg'
+		);
+
+		$this->assertSame( 20.0, $result['values']['width'], '"z podstawą" (priority 1) wygrywa nad gołym "produktu" (priority 3).' );
+	}
+
+	/**
+	 * D-21.4.1: gdy zwycięzca priorytetu („z podstawą”) trafia w degradację
+	 * (jednostka nierozpoznana), priorytet SPADA na kolejnego kandydata tej
+	 * samej osi zamiast zostawić pole `null` — kandydat zdegradowany jest
+	 * pomijany w wyścigu, „jakby go nie było”.
+	 */
+	public function test_native_values_falls_back_to_next_priority_when_winner_degraded(): void {
+		$offer = $this->offer_with_weight_dimension_params();
+
+		$offer['productSet'][0]['product']['parameters'][] = array(
+			'id'     => '206642',
+			'name'   => 'Szerokość produktu z podstawą',
+			'values' => array( '20.0' ),
+		);
+
+		$result = OfferMapper::weight_dimension_native_values(
+			$offer,
+			array(
+				'203709' => 'g',
+				'223333' => 'cm',
+				'206642' => 'stone', // Jednostka nierozpoznana przez LENGTH_TO_CM — degraduje zwycięzcę priorytetu.
+			),
+			'cm',
+			'kg'
+		);
+
+		$this->assertSame( 12.5, $result['values']['width'], 'Zwycięzca priorytetu zdegradowany — priorytet spada na "Szerokość produktu".' );
+		$this->assertSame( array( 'Szerokość produktu z podstawą' ), $result['degraded'] );
+	}
 }
