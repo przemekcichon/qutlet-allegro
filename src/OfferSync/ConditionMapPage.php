@@ -58,8 +58,8 @@ final class ConditionMapPage {
 	public static function register_menu(): void {
 		add_submenu_page(
 			'woocommerce',
-			__( 'Qutlet — mapowanie stanu Allegro', 'qutlet-allegro' ),
-			__( 'Qutlet — mapowanie stanu Allegro', 'qutlet-allegro' ),
+			__( 'Mapowanie stanów', 'qutlet-allegro' ),
+			__( 'Mapowanie stanów', 'qutlet-allegro' ),
 			self::CAPABILITY,
 			self::PAGE_SLUG,
 			array( self::class, 'render_page' )
@@ -77,7 +77,7 @@ final class ConditionMapPage {
 		}
 
 		echo '<div class="wrap">';
-		printf( '<h1>%s</h1>', esc_html__( 'Qutlet — mapowanie stanu Allegro', 'qutlet-allegro' ) );
+		printf( '<h1>%s</h1>', esc_html__( 'Mapowanie stanów', 'qutlet-allegro' ) );
 
 		printf(
 			'<p>%s</p>',
