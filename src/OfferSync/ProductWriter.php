@@ -64,6 +64,17 @@ use WC_Tax;
  * prawdy zamiast powtarzania stringów z kontraktu. Klucze pól ACF to literały
  * `field_qutlet_*` przepisane VERBATIM z rejestracji w core (P-1.2/P-1.3);
  * `update_field()` po kluczu zapisuje wartość ORAZ referencję pola.
+ *
+ * REWIZJA P-20.7a (FAZA 20, D-20.9): `cena_allegro`/`allegro_url` PRZESTAŁY iść
+ * przez `update_field()` po kluczu ACF — teraz zwykły `update_post_meta()`/
+ * `$product->update_meta_data()` po NAZWIE (ten sam wzorzec co core
+ * `MarketPriceField::save()`/`ProductDiscountRateField::save()`). Powód:
+ * `update_field()` wołane po kluczu (`field_qutlet_*`) wobec pola, które
+ * przestałoby być zarejestrowane w ACF (core, P-20.7b), cicho zapisałoby
+ * wartość pod BŁĘDNYM meta_key (dummy field, `acf_get_valid_field()`) —
+ * niedopuszczalne dla pola odpowiedzialnego za cenę. `allegro_wlaczone`
+ * (`ACF_KEY_ALLEGRO_ENABLED`) zostaje polem ACF bez zmian — poza zakresem tej
+ * rewizji.
  */
 final class ProductWriter {
 
@@ -78,25 +89,22 @@ final class ProductWriter {
 	public const ACF_KEY_ALLEGRO_ENABLED = 'field_qutlet_allegro_wlaczone';
 
 	/**
-	 * Klucz ACF pola `allegro_url` (VERBATIM z `AllegroChannelFields` w core).
-	 */
-	private const ACF_KEY_ALLEGRO_URL = 'field_qutlet_allegro_url';
-
-	/**
-	 * Klucz ACF pola `cena_allegro` (VERBATIM z `AllegroChannelFields` w core).
-	 */
-	private const ACF_KEY_ALLEGRO_PRICE = 'field_qutlet_cena_allegro';
-
-	/**
 	 * Klucz ACF pola `klasa_stanu` (VERBATIM z `ProductConditionFields` w core).
 	 */
 	private const ACF_KEY_CONDITION = 'field_qutlet_klasa_stanu';
 
 	/**
-	 * `meta_key` (name) pola `cena_allegro` — do odczytu bieżącej wartości przy
-	 * lekkim syncu (P-6.2b); zapis idzie przez klucz ACF jak przy imporcie.
+	 * `meta_key` (name) pola `cena_allegro` (P-20.7a, D-20.9: zwykła nazwa, NIE
+	 * klucz ACF) — używana do odczytu bieżącej wartości przy lekkim syncu
+	 * (P-6.2b) i do zapisu ({@see self::upsert()}/{@see self::apply_stock_and_price()}).
 	 */
 	private const ALLEGRO_PRICE_META = 'cena_allegro';
+
+	/**
+	 * `meta_key` (name) pola `allegro_url` (P-20.7a, D-20.9: zwykła nazwa, NIE
+	 * klucz ACF).
+	 */
+	private const ALLEGRO_URL_META = 'allegro_url';
 
 	/**
 	 * Statusy posta przy wyszukiwaniu po kluczu powiązania. JAWNA lista zamiast
@@ -279,17 +287,23 @@ final class ProductWriter {
 			delete_post_meta( $product_id, AllegroLinkMeta::META_MPN );
 		}
 
-		// Pola ACF kanału Allegro (kontrakt §4) — `allegro_url` sync-owned zawsze;
-		// `allegro_wlaczone` (D-9.1b.1) TYLKO przy tworzeniu nowego produktu — pełny
-		// re-import NIE nadpisuje ręcznego wyłączenia kanału przez kuratora (P-9.1b).
+		// Kanał Allegro (kontrakt §4) — `allegro_wlaczone` (D-9.1b.1) TYLKO przy
+		// tworzeniu nowego produktu (pełny re-import NIE nadpisuje ręcznego
+		// wyłączenia kanału przez kuratora, P-9.1b), jedyne z tej trójki nadal
+		// przez ACF (`update_field()` po kluczu — pole zostaje zarejestrowane).
+		// `allegro_url`/`cena_allegro` sync-owned ZAWSZE, ale od P-20.7a (D-20.9)
+		// zwykły zapis po NAZWIE meta_key, NIE `update_field()` po kluczu ACF —
+		// patrz docblock klasy.
 		if ( 'created' === $action ) {
 			update_field( self::ACF_KEY_ALLEGRO_ENABLED, 1, $product_id );
 		}
 
-		update_field( self::ACF_KEY_ALLEGRO_URL, OfferMapper::offer_url( $environment, $offer_id ), $product_id );
+		update_post_meta( $product_id, self::ALLEGRO_URL_META, OfferMapper::offer_url( $environment, $offer_id ) );
 
 		if ( null !== $cena_allegro ) {
-			update_field( self::ACF_KEY_ALLEGRO_PRICE, $cena_allegro, $product_id );
+			// number_format, nie cast — jak przy $shop_str wyżej (LC_NUMERIC, recenzja P-6.1b).
+			$product->update_meta_data( self::ALLEGRO_PRICE_META, number_format( $cena_allegro, 2, '.', '' ) );
+			$product->save();
 		}
 
 		// `klasa_stanu` (D-4.1.1/D-6.1.4, cutover P-12.2b): tylko gdy produkt NIE MA
@@ -436,9 +450,10 @@ final class ProductWriter {
 			}
 
 			$current_allegro = number_format( (float) get_post_meta( $product_id, self::ALLEGRO_PRICE_META, true ), 2, '.', '' );
+			$new_allegro     = number_format( $cena_allegro, 2, '.', '' );
 
-			if ( number_format( $cena_allegro, 2, '.', '' ) !== $current_allegro ) {
-				update_field( self::ACF_KEY_ALLEGRO_PRICE, $cena_allegro, $product_id );
+			if ( $new_allegro !== $current_allegro ) {
+				$product->update_meta_data( self::ALLEGRO_PRICE_META, $new_allegro );
 				$price_updated = true;
 			}
 		}

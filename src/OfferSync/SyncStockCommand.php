@@ -779,17 +779,20 @@ final class SyncStockCommand {
 	/**
 	 * Twarde zależności syncu — jasny komunikat zamiast fatala w połowie zapisu
 	 * (jak `ImportOffersCommand`): stawka rabatu z core P-6.1a (przeliczenie
-	 * `_price`) i ACF (`update_field` dla `cena_allegro`).
+	 * `_price`).
+	 *
+	 * REWIZJA P-20.7a (D-20.9): dawny guard `function_exists( 'update_field' )`
+	 * usunięty — pisał `cena_allegro` przez ACF, ale write-path tej komendy
+	 * ({@see ProductWriter::apply_stock_and_price()}) od tego punktu zapisuje
+	 * `cena_allegro` zwykłym `update_meta_data()`, bez ACF; `allegro_wlaczone`
+	 * (jedyne pole kanału Allegro nadal przez ACF) nie jest tu w ogóle dotykane.
+	 * Sync stanów/cen nie ma więc już żadnej zależności od ACF.
 	 *
 	 * @return void
 	 */
 	private function assert_sync_dependencies(): void {
 		if ( ! class_exists( '\Qutlet\Core\Pricing\DiscountRate' ) ) {
 			WP_CLI::error( 'Brak Qutlet\Core\Pricing\DiscountRate — zaktualizuj qutlet-core do wersji z P-6.1a (stawka rabatu).' );
-		}
-
-		if ( ! function_exists( 'update_field' ) ) {
-			WP_CLI::error( 'Brak funkcji update_field() — sync ceny wymaga aktywnego ACF (pola kanału Allegro rejestruje qutlet-core).' );
 		}
 	}
 }
