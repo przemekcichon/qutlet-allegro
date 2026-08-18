@@ -232,6 +232,23 @@ final class OfferMapper {
 	}
 
 	/**
+	 * Surowa wartość offer-level parametru „Stan opakowania" (`id 229205`,
+	 * P-21.5, kontrakt §18) — ekstrakcja MIRRORuje {@see self::condition_raw()}
+	 * (ta sama warstwa parametrów, `offer_parameters()`, NIE
+	 * `productSet[0].product.parameters[]` jak reszta specyfikacji). W
+	 * odróżnieniu od `klasa_stanu`/{@see self::CONDITION_MAP} — BEZ tabeli
+	 * mapowania: wartość jest czysto informacyjna (D-21.5.1 pkt 2), więc
+	 * konsument ({@see \Qutlet\Allegro\OfferSync\ProductWriter}) zapisuje ją
+	 * verbatim jako atrybut WC, nie mapuje na nasz kod.
+	 *
+	 * @param array<string,mixed> $offer Pełna zwrotka oferty.
+	 * @return string|null
+	 */
+	public static function packaging_condition( array $offer ): ?string {
+		return self::parameter_value( self::offer_parameters( $offer ), 'Stan opakowania' );
+	}
+
+	/**
 	 * Bieżąca zawartość auto-mapy Allegro „Stan" → `klasa_stanu` (D-4.1.1) —
 	 * odczyt dla strony informacyjnej mapowania (P-12.1c, read-only,
 	 * {@see \Qutlet\Allegro\OfferSync\ConditionMapPage}). Ta strona jest
