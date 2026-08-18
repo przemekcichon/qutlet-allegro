@@ -47,6 +47,78 @@ final class OfferMapper {
 	);
 
 	/**
+	 * Rodzaje kandydatów wagowo-wymiarowych — {@see self::WEIGHT_DIMENSION_CANDIDATES}.
+	 */
+	private const KIND_DIMENSION = 'dimension';
+	private const KIND_WEIGHT    = 'weight';
+
+	/**
+	 * Kuratorska lista kandydatów na atrybuty wagowo-wymiarowe produktu/paczki
+	 * (D-21.3.1, kontrakt §16) — nazwa parametru (VERBATIM ze słownika
+	 * kategorii, §15) → rodzaj ({@see self::KIND_DIMENSION}/{@see self::KIND_WEIGHT}).
+	 * Identyfikacja kandydata jest po NAZWIE (ta lista); sama JEDNOSTKA i
+	 * przelicznik są rozstrzygane WYŁĄCZNIE przez `id` parametru ze słownika
+	 * kategorii ({@see self::weight_dimension_attributes()}) — nigdy z nazwy.
+	 * Generyczne „każdy parametr z jednostką długości/wagi” było ŚWIADOMIE
+	 * odrzucone (kontrakt §16): wciągnęłoby np. `Długość przewodu` (`m`,
+	 * kontrprzykład §15) w obróbkę zarezerwowaną dla wymiarów/wagi
+	 * PRODUKTU/PACZKI.
+	 *
+	 * Lista NIE jest zamknięta — 391 różnych nazw parametrów w całej próbce
+	 * ofert (mapping §4b), tu sprawdzony tylko ułamek (§15); dopisywanie
+	 * nowych nazw przy kolejnych kategoriach jest oczekiwane, wzorem
+	 * {@see self::CONDITION_MAP}.
+	 *
+	 * @var array<string,string>
+	 */
+	private const WEIGHT_DIMENSION_CANDIDATES = array(
+		'Szerokość produktu'                      => self::KIND_DIMENSION,
+		'Wysokość produktu'                        => self::KIND_DIMENSION,
+		'Głębokość produktu'                       => self::KIND_DIMENSION,
+		'Szerokość produktu z podstawą'            => self::KIND_DIMENSION,
+		'Wysokość produktu z podstawą'             => self::KIND_DIMENSION,
+		'Głębokość produktu z podstawą'            => self::KIND_DIMENSION,
+		'Szerokość grilla'                         => self::KIND_DIMENSION,
+		'Głębokość grilla'                         => self::KIND_DIMENSION,
+		'Wysokość grilla'                          => self::KIND_DIMENSION,
+		'Waga'                                     => self::KIND_WEIGHT,
+		'Waga produktu'                            => self::KIND_WEIGHT,
+		'Waga produktu z opakowaniem jednostkowym' => self::KIND_WEIGHT,
+		'Waga z podstawą'                          => self::KIND_WEIGHT,
+	);
+
+	/**
+	 * Przeliczniki jednostek długości → `cm` (baza kanoniczna), D-21.3.1 pkt 4
+	 * (kontrakt §16) — pełny zestaw jednostek dostępnych w ustawieniach
+	 * WooCommerce (`woocommerce_dimension_unit`), nie tylko `cm` widziane
+	 * dziś lokalnie.
+	 *
+	 * @var array<string,float>
+	 */
+	private const LENGTH_TO_CM = array(
+		'mm' => 0.1,
+		'cm' => 1.0,
+		'm'  => 100.0,
+		'in' => 2.54,
+		'yd' => 91.44,
+	);
+
+	/**
+	 * Przeliczniki jednostek wagi → `g` (baza kanoniczna), D-21.3.1 pkt 4
+	 * (kontrakt §16) — pełny zestaw jednostek dostępnych w ustawieniach
+	 * WooCommerce (`woocommerce_weight_unit`), nie tylko `g`/`kg` widziane w
+	 * próbce §15.
+	 *
+	 * @var array<string,float>
+	 */
+	private const WEIGHT_TO_G = array(
+		'g'   => 1.0,
+		'kg'  => 1000.0,
+		'oz'  => 28.3495,
+		'lbs' => 453.592, // Literał VERBATIM z `WC_Enums\WeightUnit::POUND` — NIE `lb` (recenzja P-21.3).
+	);
+
+	/**
 	 * Bazy publicznych stron ofert per środowisko. Oferta nie niesie gotowego URL-a
 	 * (mapping §2) — budujemy z `id`. Na sandboxie link ma prowadzić do sandboxa
 	 * (inaczej `allegro_url` w dev wskazywałby nieistniejącą ofertę produkcyjną).
@@ -333,6 +405,131 @@ final class OfferMapper {
 		}
 
 		return $rows;
+	}
+
+	/**
+	 * `nazwa => id` dla kandydatów wagowo-wymiarowych ({@see self::WEIGHT_DIMENSION_CANDIDATES},
+	 * D-21.3.1, kontrakt §16) FAKTYCZNIE obecnych w parametrach produktowych
+	 * tej oferty. Zwraca `[]`, gdy oferta nie ma żadnego kandydata — sygnał
+	 * dla wołającego (P-21.3b, `ImportOffersCommand`), że nie trzeba odpytywać
+	 * słownika parametrów kategorii ({@see \Qutlet\Allegro\OfferSync\CategoryParameterUnits}),
+	 * unika zbędnego żądania HTTP per oferta/kategoria.
+	 *
+	 * @param array<string,mixed> $offer Pełna zwrotka oferty.
+	 * @return array<string,string>
+	 */
+	public static function weight_dimension_param_ids( array $offer ): array {
+		$ids = array();
+
+		foreach ( self::product_parameters( $offer ) as $param ) {
+			if ( ! is_array( $param ) || ! isset( $param['name'], $param['id'] ) || ! is_string( $param['name'] ) ) {
+				continue;
+			}
+
+			if ( ! isset( self::WEIGHT_DIMENSION_CANDIDATES[ $param['name'] ] ) ) {
+				continue;
+			}
+
+			$ids[ $param['name'] ] = (string) $param['id'];
+		}
+
+		return $ids;
+	}
+
+	/**
+	 * `nazwa => "wartość jednostka"` (np. `"0.83 kg"`) dla kandydatów
+	 * wagowo-wymiarowych z tej oferty (D-21.3.1, kontrakt §16) — wartość
+	 * PRZELICZONA do jednostki sklepu, gdy jednostka Allegro (rozstrzygnięta
+	 * WYŁĄCZNIE przez `id` w `$category_units`, §15) się różni. Dotyczy tylko
+	 * warstwy przerobionej (atrybuty WC) — {@see self::specification()}
+	 * (warstwa surowa) zostaje nietknięta, wołający wywołuje obie osobno.
+	 *
+	 * Dwie różne degradacje (D-21.3.1 pkt 3), obie bez zgadywania:
+	 * - `id` NIEOBECNE w `$category_units` (błąd HTTP / brak w zwrotce słownika)
+	 *   — jednostka Allegro w ogóle nieznana, więc kandydat jest POMIJANY w
+	 *   wyniku; wołający (P-21.3b, `ProductWriter`) zostawia oryginalną
+	 *   wartość specyfikacji bez zmian (bez jednostki) i loguje ostrzeżenie.
+	 * - jednostka `$unit` ZNANA, ale nierozpoznana przez tabelę konwersji
+	 *   ({@see self::LENGTH_TO_CM}/{@see self::WEIGHT_TO_G}, np. docelowa
+	 *   jednostka sklepu spoza pokrywanego zestawu) — wynik NIESIE oryginalną
+	 *   wartość Allegro z oryginalną (nieprzeliczoną) jednostką Allegro,
+	 *   zgodnie z literą D-21.3.1 pkt 3 („zapisany z oryginalną wartością I
+	 *   jednostką Allegro”), nie jest pomijany.
+	 *
+	 * @param array<string,mixed>  $offer           Pełna zwrotka oferty.
+	 * @param array<string,string> $category_units  `id => unit` ze słownika parametrów kategorii tej oferty.
+	 * @param string                $dimension_unit Docelowa jednostka długości (`woocommerce_dimension_unit`).
+	 * @param string                $weight_unit    Docelowa jednostka wagi (`woocommerce_weight_unit`).
+	 * @return array<string,string>
+	 */
+	public static function weight_dimension_attributes( array $offer, array $category_units, string $dimension_unit, string $weight_unit ): array {
+		$result = array();
+
+		foreach ( self::weight_dimension_param_ids( $offer ) as $name => $id ) {
+			$unit = $category_units[ $id ] ?? null;
+
+			if ( null === $unit ) {
+				continue;
+			}
+
+			$raw_value = self::parameter_value( self::product_parameters( $offer ), $name );
+
+			if ( null === $raw_value || ! is_numeric( $raw_value ) ) {
+				continue;
+			}
+
+			$kind        = self::WEIGHT_DIMENSION_CANDIDATES[ $name ];
+			$target_unit = self::KIND_DIMENSION === $kind ? $dimension_unit : $weight_unit;
+			$table       = self::KIND_DIMENSION === $kind ? self::LENGTH_TO_CM : self::WEIGHT_TO_G;
+			$converted   = self::convert_unit( (float) $raw_value, $unit, $target_unit, $table );
+
+			if ( null === $converted ) {
+				// Jednostka Allegro ZNANA, ale nierozpoznana przez tabelę konwersji
+				// (albo jednostka docelowa sklepu nierozpoznana) — D-21.3.1 pkt 3:
+				// oryginalna wartość + oryginalna jednostka Allegro, bez przeliczenia.
+				$result[ $name ] = self::format_converted_value( (float) $raw_value ) . ' ' . $unit;
+
+				continue;
+			}
+
+			$result[ $name ] = self::format_converted_value( $converted ) . ' ' . $target_unit;
+		}
+
+		return $result;
+	}
+
+	/**
+	 * Przelicza wartość między dwiema jednostkami przez wspólną bazę
+	 * kanoniczną (`$table`: jednostka → mnożnik do bazy). `null`, gdy
+	 * jednostka źródłowa LUB docelowa nie jest w tabeli — degradacja
+	 * (D-21.3.1 pkt 3), nie zgadywanie.
+	 *
+	 * @param float                $value Wartość źródłowa.
+	 * @param string                $from Jednostka źródłowa (Allegro, ze słownika kategorii).
+	 * @param string                $to   Jednostka docelowa (ustawienie sklepu).
+	 * @param array<string,float>  $table Mnożniki jednostka → baza kanoniczna ({@see self::LENGTH_TO_CM}/{@see self::WEIGHT_TO_G}).
+	 * @return float|null
+	 */
+	private static function convert_unit( float $value, string $from, string $to, array $table ): ?float {
+		if ( ! isset( $table[ $from ], $table[ $to ] ) ) {
+			return null;
+		}
+
+		return $value * $table[ $from ] / $table[ $to ];
+	}
+
+	/**
+	 * Formatuje liczbę przeliczoną bez zbędnych zer (wzorem {@see self::vat_rate()}
+	 * — `rtrim` ogonków), max 3 miejsca po przecinku (wystarcza na precyzję
+	 * `g → kg`, §15: wartości wagowe w próbce mają precyzję całkowitą/2-miejscową).
+	 *
+	 * @param float $value Wartość przeliczona.
+	 * @return string
+	 */
+	private static function format_converted_value( float $value ): string {
+		$formatted = rtrim( rtrim( number_format( $value, 3, '.', '' ), '0' ), '.' );
+
+		return '' === $formatted ? '0' : $formatted;
 	}
 
 	/**

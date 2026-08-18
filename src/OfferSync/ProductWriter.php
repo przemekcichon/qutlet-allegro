@@ -145,6 +145,9 @@ final class ProductWriter {
 	 * @param array<int,array{id:string,name:string}>  $category_path Rozwiązana ścieżka liść→korzeń (może być pusta).
 	 * @param string                                   $status        Status posta dla NOWEGO produktu (`pending`/`publish`/`draft`).
 	 * @param bool                                     $skip_images   Pominięcie side-loadu zdjęć (przebiegi próbne).
+	 * @param array<string,string>                     $category_units `id parametru => jednostka` ze słownika parametrów kategorii tej oferty (D-21.3.1, kontrakt §16; `[]` gdy oferta nie ma kandydatów wagowo-wymiarowych — {@see OfferMapper::weight_dimension_param_ids()}).
+	 * @param string                                   $dimension_unit Ustawienie sklepu `woocommerce_dimension_unit` (D-21.3.1).
+	 * @param string                                   $weight_unit    Ustawienie sklepu `woocommerce_weight_unit` (D-21.3.1).
 	 * @return array{action:string,product_id:int,warnings:array<int,string>}
 	 */
 	public function upsert(
@@ -154,7 +157,10 @@ final class ProductWriter {
 		string $category_slug,
 		array $category_path,
 		string $status,
-		bool $skip_images
+		bool $skip_images,
+		array $category_units = array(),
+		string $dimension_unit = 'cm',
+		string $weight_unit = 'kg'
 	): array {
 		$offer_id = (string) ( $offer['id'] ?? '' );
 		$warnings = array();
@@ -255,17 +261,42 @@ final class ProductWriter {
 
 		update_post_meta( $product_id, RawLayerMeta::META_SPECIFICATION_RAW, wp_slash( $specification ) );
 
+		// Jednostki wagowo-wymiarowe (D-21.3.1, kontrakt §16) — dotyczy WYŁĄCZNIE
+		// warstwy przerobionej (atrybuty WC niżej); `$specification` zapisana wyżej
+		// do warstwy surowej zostaje verbatim, konwersji nie widzi (D-6.G4).
+		$unit_overrides = OfferMapper::weight_dimension_attributes( $offer, $category_units, $dimension_unit, $weight_unit );
+
+		// Warning TYLKO dla przypadku, w którym `weight_dimension_attributes()`
+		// nie mogła wyprodukować ŻADNEGO wiersza (id nieobecne w słowniku
+		// kategorii albo wartość nienumeryczna) — jednostka ZNANA, ale
+		// nierozpoznana przez tabelę konwersji dostaje własny wiersz z
+		// oryginalną jednostką Allegro (patrz docblock `weight_dimension_attributes()`),
+		// więc NIE trafia tu jako pominięcie.
+		foreach ( OfferMapper::weight_dimension_param_ids( $offer ) as $param_name => $param_id ) {
+			if ( ! isset( $unit_overrides[ $param_name ] ) ) {
+				$warnings[] = sprintf(
+					'Parametr wagowo-wymiarowy „%s" (id=%s) nie ma rozstrzygniętej jednostki w słowniku kategorii (błąd HTTP/id nieobecny) albo wartość jest nienumeryczna — atrybut zapisany bez konwersji (D-21.3.1).',
+					$param_name,
+					$param_id
+				);
+			}
+		}
+
 		// Atrybuty WC (kontrakt §9.2, P-13.4a/D-13.G1) — tłumaczenie 1:1 z tej
 		// samej specyfikacji surowej, BEZ udziału AI; nadpisywane każdym przebiegiem
-		// (sync-owned, D-13.4a.1 — patrz docblock klasy). Osobny `save()`, bo
-		// `set_attributes()` nie jest częścią żadnego z pól ustawionych na `$product`
-		// przed pierwszym `save()` powyżej. UWAGA: `set_attributes()` PODMIENIA cały
-		// zestaw atrybutów produktu, nie tylko wiersze ze specyfikacji — dziś
-		// nieszkodliwe (P-13.4b: AI już nie pisze atrybutów, nic innego też), ale
-		// gdyby w przyszłości jakiś inny mechanizm zaczął dopisywać własne atrybuty
-		// WC do tych samych produktów (np. globalne atrybuty taksonomiczne do
-		// filtrowania), ten sync je bezwarunkowo skasuje przy najbliższym przebiegu.
-		$product->set_attributes( self::build_attributes( $specification ) );
+		// (sync-owned, D-13.4a.1 — patrz docblock klasy). Wiersze wagowo-wymiarowe
+		// dostają dopisaną jednostkę sklepu + konwersję liczby ($unit_overrides
+		// wyżej, D-21.3.1) — TYLKO w tej kopii przekazanej do `build_attributes()`,
+		// `$specification` (już zapisana do warstwy surowej) zostaje nietknięta.
+		// Osobny `save()`, bo `set_attributes()` nie jest częścią żadnego z pól
+		// ustawionych na `$product` przed pierwszym `save()` powyżej. UWAGA:
+		// `set_attributes()` PODMIENIA cały zestaw atrybutów produktu, nie tylko
+		// wiersze ze specyfikacji — dziś nieszkodliwe (P-13.4b: AI już nie pisze
+		// atrybutów, nic innego też), ale gdyby w przyszłości jakiś inny mechanizm
+		// zaczął dopisywać własne atrybuty WC do tych samych produktów (np.
+		// globalne atrybuty taksonomiczne do filtrowania), ten sync je
+		// bezwarunkowo skasuje przy najbliższym przebiegu.
+		$product->set_attributes( self::build_attributes( self::apply_unit_overrides( $specification, $unit_overrides ) ) );
 		$product->save();
 
 		// Nazwa oryginalna Allegro (P-13.2b, kontrakt §9.1) — RÓWNOLEGLE z `set_name()`
@@ -692,6 +723,32 @@ final class ProductWriter {
 		}
 
 		return $created['slug'];
+	}
+
+	/**
+	 * Nakłada `$overrides` (D-21.3.1, kontrakt §16 — wartości wagowo-wymiarowe
+	 * przeliczone do jednostki sklepu, {@see OfferMapper::weight_dimension_attributes()})
+	 * na KOPIĘ `$specification`, dopasowując po `etykieta`. Czysta funkcja —
+	 * `$specification` przyjęta przez wartość, więc wołający (już zapisał TĘ
+	 * SAMĄ tablicę do warstwy surowej, `RawLayerMeta::META_SPECIFICATION_RAW`)
+	 * zostaje nietknięty.
+	 *
+	 * @param array<int, array{etykieta: string, wartosc: string}> $specification Pary etykieta→wartość ({@see OfferMapper::specification()}).
+	 * @param array<string, string>                                $overrides     `etykieta => "wartość jednostka"` ({@see OfferMapper::weight_dimension_attributes()}).
+	 * @return array<int, array{etykieta: string, wartosc: string}>
+	 */
+	private static function apply_unit_overrides( array $specification, array $overrides ): array {
+		if ( array() === $overrides ) {
+			return $specification;
+		}
+
+		foreach ( $specification as $index => $row ) {
+			if ( isset( $overrides[ $row['etykieta'] ] ) ) {
+				$specification[ $index ]['wartosc'] = $overrides[ $row['etykieta'] ];
+			}
+		}
+
+		return $specification;
 	}
 
 	/**
