@@ -266,10 +266,16 @@ final class ProductWriter {
 		// do warstwy surowej zostaje verbatim, konwersji nie widzi (D-6.G4).
 		$unit_overrides = OfferMapper::weight_dimension_attributes( $offer, $category_units, $dimension_unit, $weight_unit );
 
+		// Warning TYLKO dla przypadku, w którym `weight_dimension_attributes()`
+		// nie mogła wyprodukować ŻADNEGO wiersza (id nieobecne w słowniku
+		// kategorii albo wartość nienumeryczna) — jednostka ZNANA, ale
+		// nierozpoznana przez tabelę konwersji dostaje własny wiersz z
+		// oryginalną jednostką Allegro (patrz docblock `weight_dimension_attributes()`),
+		// więc NIE trafia tu jako pominięcie.
 		foreach ( OfferMapper::weight_dimension_param_ids( $offer ) as $param_name => $param_id ) {
 			if ( ! isset( $unit_overrides[ $param_name ] ) ) {
 				$warnings[] = sprintf(
-					'Parametr wagowo-wymiarowy „%s" (id=%s) nie ma rozstrzygniętej jednostki (brak w słowniku kategorii albo jednostka nierozpoznana) — atrybut zapisany bez konwersji (D-21.3.1).',
+					'Parametr wagowo-wymiarowy „%s" (id=%s) nie ma rozstrzygniętej jednostki w słowniku kategorii (błąd HTTP/id nieobecny) albo wartość jest nienumeryczna — atrybut zapisany bez konwersji (D-21.3.1).',
 					$param_name,
 					$param_id
 				);

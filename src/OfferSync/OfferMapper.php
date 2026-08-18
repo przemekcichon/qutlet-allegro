@@ -112,10 +112,10 @@ final class OfferMapper {
 	 * @var array<string,float>
 	 */
 	private const WEIGHT_TO_G = array(
-		'g'  => 1.0,
-		'kg' => 1000.0,
-		'oz' => 28.3495,
-		'lb' => 453.592,
+		'g'   => 1.0,
+		'kg'  => 1000.0,
+		'oz'  => 28.3495,
+		'lbs' => 453.592, // Literał VERBATIM z `WC_Enums\WeightUnit::POUND` — NIE `lb` (recenzja P-21.3).
 	);
 
 	/**
@@ -444,11 +444,17 @@ final class OfferMapper {
 	 * warstwy przerobionej (atrybuty WC) — {@see self::specification()}
 	 * (warstwa surowa) zostaje nietknięta, wołający wywołuje obie osobno.
 	 *
-	 * Kandydat bez rozstrzygniętej jednostki (`id` nieobecne w
-	 * `$category_units`, albo jednostka źródłowa/docelowa nierozpoznana przez
-	 * {@see self::LENGTH_TO_CM}/{@see self::WEIGHT_TO_G}) jest POMIJANY w
-	 * wyniku — wołający (P-21.3b, `ProductWriter`) zostawia oryginalną
-	 * wartość specyfikacji bez zmian i loguje ostrzeżenie (D-21.3.1 pkt 3).
+	 * Dwie różne degradacje (D-21.3.1 pkt 3), obie bez zgadywania:
+	 * - `id` NIEOBECNE w `$category_units` (błąd HTTP / brak w zwrotce słownika)
+	 *   — jednostka Allegro w ogóle nieznana, więc kandydat jest POMIJANY w
+	 *   wyniku; wołający (P-21.3b, `ProductWriter`) zostawia oryginalną
+	 *   wartość specyfikacji bez zmian (bez jednostki) i loguje ostrzeżenie.
+	 * - jednostka `$unit` ZNANA, ale nierozpoznana przez tabelę konwersji
+	 *   ({@see self::LENGTH_TO_CM}/{@see self::WEIGHT_TO_G}, np. docelowa
+	 *   jednostka sklepu spoza pokrywanego zestawu) — wynik NIESIE oryginalną
+	 *   wartość Allegro z oryginalną (nieprzeliczoną) jednostką Allegro,
+	 *   zgodnie z literą D-21.3.1 pkt 3 („zapisany z oryginalną wartością I
+	 *   jednostką Allegro”), nie jest pomijany.
 	 *
 	 * @param array<string,mixed>  $offer           Pełna zwrotka oferty.
 	 * @param array<string,string> $category_units  `id => unit` ze słownika parametrów kategorii tej oferty.
@@ -478,6 +484,11 @@ final class OfferMapper {
 			$converted   = self::convert_unit( (float) $raw_value, $unit, $target_unit, $table );
 
 			if ( null === $converted ) {
+				// Jednostka Allegro ZNANA, ale nierozpoznana przez tabelę konwersji
+				// (albo jednostka docelowa sklepu nierozpoznana) — D-21.3.1 pkt 3:
+				// oryginalna wartość + oryginalna jednostka Allegro, bez przeliczenia.
+				$result[ $name ] = self::format_converted_value( (float) $raw_value ) . ' ' . $unit;
+
 				continue;
 			}
 

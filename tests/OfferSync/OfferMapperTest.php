@@ -504,4 +504,46 @@ final class OfferMapperTest extends TestCase {
 			OfferMapper::weight_dimension_attributes( $this->offer(), array(), 'cm', 'kg' )
 		);
 	}
+
+	/**
+	 * Recenzja P-21.3: literał `lbs` (nie `lb`, {@see \Qutlet\Allegro\OfferSync\OfferMapper}
+	 * `WEIGHT_TO_G`) był dotąd niepokryty żadnym testem — pokrywa też kierunek
+	 * konwersji INNY niż g→kg (funty jako jednostka Allegro, sklep w kg).
+	 */
+	public function test_weight_dimension_attributes_converts_pounds_to_kilograms(): void {
+		$overrides = OfferMapper::weight_dimension_attributes(
+			$this->offer_with_weight_dimension_params(),
+			array(
+				'203709' => 'lbs',
+				'223333' => 'cm',
+			),
+			'cm',
+			'kg'
+		);
+
+		// 830 „lbs” (wartość testowa, nie realna próbka) → 376.48 kg.
+		$this->assertSame( '376.481 kg', $overrides['Waga produktu'] );
+	}
+
+	/**
+	 * D-21.3.1 pkt 3, druga gałąź degradacji (recenzja P-21.3): jednostka
+	 * Allegro ZNANA (`id` rozstrzygnięty w słowniku), ale docelowa jednostka
+	 * sklepu nierozpoznana przez tabelę konwersji — wynik niesie ORYGINALNĄ
+	 * wartość + ORYGINALNĄ jednostkę Allegro (nie pomija wiersza, nie
+	 * przelicza na siłę), inaczej niż gdy `id` w ogóle nie ma jednostki w
+	 * słowniku (poprzedni test, wciąż POMIJA wiersz).
+	 */
+	public function test_weight_dimension_attributes_keeps_original_unit_when_target_unrecognized(): void {
+		$overrides = OfferMapper::weight_dimension_attributes(
+			$this->offer_with_weight_dimension_params(),
+			array(
+				'203709' => 'g',
+				'223333' => 'cm',
+			),
+			'cm',
+			'stone' // Jednostka sklepu spoza WEIGHT_TO_G — nierealna dla WooCommerce, ale ćwiczy fallback.
+		);
+
+		$this->assertSame( '830 g', $overrides['Waga produktu'], 'Bez przeliczenia (jednostka docelowa nierozpoznana), ale z jednostką Allegro dopisaną — D-21.3.1 pkt 3.' );
+	}
 }

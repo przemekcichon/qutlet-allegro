@@ -362,7 +362,9 @@ final class ImportOffersCommand {
 			// ofert (większość, bez parametrów wagi/wymiaru) nie płaci kosztu
 			// dodatkowego żądania HTTP.
 			$candidate_ids  = OfferMapper::weight_dimension_param_ids( $offer );
-			$category_units = array() === $candidate_ids ? array() : $units_resolver->units_for_category( $leaf_id );
+			$category_units = array() === $candidate_ids || '' === $leaf_id
+				? array()
+				: $units_resolver->units_for_category( $leaf_id );
 
 			$result = $writer->upsert( $offer, $full['body'], $environment, $slug, $path, $status, $skip_images, $category_units, $dimension_unit, $weight_unit );
 
